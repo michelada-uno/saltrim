@@ -75,8 +75,17 @@
       [:meta {:charset "utf-8"}]
       [:title "calcloj"]
       [:script {:type "module" :src "/datastar.js"}]]
-     [:body {:data-signals "{cell:'', v:''}"
+     [:body {:data-signals "{cell:'', v:'', err:''}"
              :style "font-family:sans-serif;padding:1rem;"}
+      ;; toast: shows $err, click to dismiss
+      [:div {:id "toast"
+             :data-show "$err != ''"
+             :data-text "$err"
+             :data-on:click "$err=''"
+             :style (str "position:fixed;top:1rem;right:1rem;max-width:26rem;"
+                         "background:#c0392b;color:#fff;padding:.6rem .9rem;"
+                         "border-radius:6px;font:13px sans-serif;cursor:pointer;"
+                         "box-shadow:0 2px 8px rgba(0,0,0,.3);z-index:10;")}]
       [:h2 "calcloj"]
       [:p {:style "color:#666;"} "Edit a cell. Formula: "
        [:code "=(+ #cell A1 #cell B1)"] " · range: "
@@ -97,6 +106,12 @@
             (apply str))
        "\n"))
 
+(defn- signals-event
+  "SSE that patches frontend signals (e.g. the $err toast)."
+  [m]
+  (str "event: datastar-patch-signals\n"
+       "data: signals " (json/write-value-as-string m) "\n\n"))
+
 (defn- sse-response [body]
   {:status 200
    :headers {"Content-Type" "text/event-stream"
@@ -111,6 +126,15 @@
 
 (def ^:private edit-lock (Object.))
 
+(defn- pretty-err [msg]
+  (let [m (str msg)]
+    (cond
+      (re-find #"cannot be cast" m)        "type error (number expected)"
+      (re-find #"Divide by zero" m)        "divide by zero"
+      (re-find #"unknown cell" m)          "reference to empty cell"
+      (re-find #"disallowed symbol" m)     "not allowed in a formula"
+      :else m)))
+
 (defn- handle-cell [req]
   (let [sh (the-sheet)
         {:keys [cell v]} (read-json req)]
@@ -118,10 +142,21 @@
       ;; One sheet = one execution context with mutable graph state. Serialize
       ;; edits so concurrent requests don't race set-cell!/settle/recompute.
       (locking edit-lock
-        (sheet/set-cell! sh cell (str v))
-        (sheet/settle! sh)
-        (let [affected (cons cell (sort (sheet/dependents* sh cell)))]
-          (sse-response (patch-cells-event sh affected))))
+        (try
+          (sheet/set-cell! sh cell (str v))
+          (sheet/settle! sh)
+          (let [affected (cons cell (sort (sheet/dependents* sh cell)))
+                errs (keep (fn [a]
+                             (when-let [e (:error (sheet/value sh a))]
+                               (str a ": " (pretty-err e))))
+                           affected)]
+            ;; cell #ERR comes from per-cell patch; toast surfaces the message
+            (sse-response (str (patch-cells-event sh affected)
+                               (signals-event {:err (if (seq errs)
+                                                      (str/join "; " errs) "")}))))
+          (catch Throwable e
+            ;; set-time error (bad formula, disallowed symbol): no crash, toast
+            (sse-response (signals-event {:err (str cell ": " (pretty-err (.getMessage e)))})))))
       (sse-response "\n"))))
 
 (defn- app [req]
