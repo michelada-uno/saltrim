@@ -48,10 +48,24 @@ REMAINING (minor):
   too (carefully — avoid racing a load that is mid-handshake).
 - TTL/sweep interval are constants; move to config.
 
-NOTE: we dropped the persistent-SSE approach — http-kit does not fire an
-async-channel close on idle client disconnect without a write (verified). A
-Netty-based adapter (Aleph) would detect *graceful* disconnects, but still not
-crash/sleep — the sweep is needed regardless, so beacon + sweep it is.
+NOTE: collaboration uses a persistent per-session SSE stream (/stream) for
+server->client push. Cleanup does NOT rely on http-kit's channel close (it
+doesn't fire on idle disconnect without a write); instead beacon + sweep call
+reap-session! which close-sse!s the stored generator. No heartbeat.
+
+## Collaboration — follow-ups
+
+- **Stream reconnect**: the stream is opened via Datastar `@get`; if it drops
+  (server restart, transient network) the client does not auto-reconnect like a
+  native EventSource. Add a reconnect (re-click the trigger on error / poll).
+- **Dead-connection reaping latency**: a crashed peer's stream is closed on the
+  next broadcast to it (write throws -> reap) or by the sweep. Fine, but means a
+  zombie socket can linger up to the sweep interval with no traffic.
+- **Editor double-path**: the editor still gets its patches from the one-shot
+  `@post` response; peers get them via the stream. Could unify (everything via
+  streams, `/cell` returns empty) once reconnect is solid.
+- **Conflict policy**: last-write-wins, no locking/merge. Fine for now; revisit
+  if simultaneous edits to the same cell matter.
 
 The `/debug` endpoint (session/sheet counts) is dev-only — gate or remove before
 any real deployment.

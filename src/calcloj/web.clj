@@ -108,12 +108,20 @@
     (when-not (@sessions* sid) (register-session! sid sheet-id))
     (touch! sid)))
 
+(declare close-gen!)
+(defn- reap-session!
+  "Drop a session: close its push stream and unload the sheet if it was last."
+  [sid]
+  (when-let [s (@sessions* sid)]
+    (close-gen! s)
+    (swap! sessions* dissoc sid)
+    (unload-sheet! (:sheet s))))
+
 (defn- sweep! []
   (let [cutoff (- (now) SESSION-TTL-MS)]
     (doseq [[sid s] @sessions*]
       (when (< (long (:last-seen s 0)) cutoff)
-        (swap! sessions* dissoc sid)
-        (unload-sheet! (:sheet s))))))
+        (reap-session! sid)))))
 
 (defonce ^:private sweeper* (atom nil))
 (defn- start-sweeper! []
@@ -224,9 +232,13 @@
       [:script {:src "/app.js"}]]
      [:body {:data-signals (format "{cell:'', v:'', err:'', sel:'', bar:'', r0:0, c0:0, sheet:'%s', sid:''}" id)
              :style "font-family:sans-serif;margin:0;padding:.6rem;"}
-      ;; hidden input carrying the session id into $sid; /app.js generates the
-      ;; id, fills this, and opens the lifecycle EventSource.
+      ;; hidden input carrying the session id into $sid, and a hidden trigger
+      ;; /app.js clicks to open the persistent collaboration stream via Datastar
+      ;; (so pushed patches are applied). $sid/$sheet go in the URL.
       [:input {:id "sidbox" :data-bind:sid "" :style "display:none;"}]
+      [:button {:id "streamtrigger"
+                :data-on:click "@get('/stream?sid='+$sid+'&s='+$sheet)"
+                :style "display:none;"} ""]
       [:div {:id "toast" :data-show "$err != ''" :data-text "$err"
              :data-on:click "$err=''"
              :style (str "position:fixed;top:1rem;right:1rem;max-width:26rem;background:#c0392b;"
@@ -302,6 +314,30 @@
 (defn- sheet-id-of [{:keys [sheet]}]
   (if (store/valid-id? sheet) sheet "default"))
 
+(defn- qparam [req k]
+  (some->> (:query-string req)
+           (re-find (re-pattern (str "(?:^|&)" k "=([^&]+)")))
+           second))
+
+(defn- close-gen! [s]
+  (when-let [g (:gen s)] (try (d*/close-sse! g) (catch Throwable _))))
+
+(defn- render-cells [sh addrs]
+  (apply str (map #(str (h/html (cell-input sh % (:ci (addr/parse %)) (:ri (addr/parse %)))))
+                  addrs)))
+
+(defn- broadcast!
+  "Push changed cells to OTHER sessions on the same sheet, each scoped to that
+   session's own viewport. Collaboration: a peer sees your edit live. A write to
+   a dead stream throws -> reap that session."
+  [editor-sid sheet-id sh affected]
+  (doseq [[sid s] @sessions*]
+    (when (and (not= sid editor-sid) (= sheet-id (:sheet s)) (:gen s))
+      (let [vis (filter #(in-window? (:view s) %) affected)]
+        (when (seq vis)
+          (try (d*/lock-sse! (:gen s) (d*/patch-elements! (:gen s) (render-cells sh vis)))
+               (catch Throwable _ (reap-session! sid))))))))
+
 (defn- handle-cell [req]
   (let [{:keys [cell v sid] :as sig} (read-signals req)
         sheet-id (sheet-id-of sig)
@@ -322,13 +358,12 @@
                                  (when-let [e (:error (sheet/value sh a))]
                                    (str a ": " (pretty-err e))))
                                affected)]
+                ;; editor: immediate feedback on this one-shot response
                 (when (seq visible)
-                  (d*/patch-elements!                  ; default mode outer: morph by id
-                   gen (apply str (map #(str (h/html (cell-input sh %
-                                                                 (:ci (addr/parse %))
-                                                                 (:ri (addr/parse %)))))
-                                       visible))))
-                (signals! gen {:err (if (seq errs) (str/join "; " errs) "")}))
+                  (d*/patch-elements! gen (render-cells sh visible)))
+                (signals! gen {:err (if (seq errs) (str/join "; " errs) "")})
+                ;; collaborators: push the same change to their streams
+                (broadcast! sid sheet-id sh affected))
               (catch Throwable e
                 (signals! gen {:err (str cell ": " (pretty-err (.getMessage e)))})))))))))
 
@@ -352,27 +387,33 @@
             (do (set-session-dims! sid new-dims)
                 (patch-inner! gen "#scroll" (str (grid-layers sh view))))))))))
 
-;; Session lifecycle via plain HTTP. Client registers on load and, on page
-;; unload, fires navigator.sendBeacon to /session/end (reliable during unload).
-;; Crash/sleep — where the beacon never fires — is handled by the TTL sweep.
+;; Session lifecycle. The persistent /stream registers the session and stores
+;; its push generator (server -> client collaboration channel). Cleanup never
+;; relies on http-kit's channel close (it doesn't fire on idle disconnect):
+;; - graceful unload -> navigator.sendBeacon('/session/end')
+;; - crash/sleep      -> the TTL sweep
+;; both call reap-session!, which close-sse!s the stored generator.
+
+(defn- handle-stream
+  "Persistent per-session SSE. Registers the session and stores its generator so
+   edits elsewhere can be pushed here. Stays open — never close-sse! on open."
+  [req]
+  (let [sid      (qparam req "sid")
+        sheet-id (let [s (qparam req "s")] (if (store/valid-id? s) s "default"))]
+    (hk/->sse-response req
+      {hk/on-open
+       (fn [gen]
+         (when (and sid (re-matches sid-re sid))
+           (register-session! sid sheet-id)
+           (swap! sessions* assoc-in [sid :gen] gen)))})))
 
 (defn- body-json [req]
   (when-let [b (:body req)]
     (json/read-value (slurp b) json/keyword-keys-object-mapper)))
 
-(defn- handle-session-start [req]
-  (let [{:keys [sid sheet]} (body-json req)
-        sheet-id (if (store/valid-id? sheet) sheet "default")]
-    (when (and sid (re-matches sid-re (str sid)))
-      (register-session! sid sheet-id))
-    {:status 204}))
-
 (defn- handle-session-end [req]
   (let [{:keys [sid]} (body-json req)]
-    (when (and sid (@sessions* sid))
-      (let [sid-sheet (sheet-of sid)]
-        (swap! sessions* dissoc sid)
-        (unload-sheet! sid-sheet)))
+    (when sid (reap-session! sid))
     {:status 204}))
 
 (defn- app [req]
@@ -391,7 +432,7 @@
                             {:status 200 :headers {"Content-Type" "text/javascript"}
                              :body (slurp r)}
                             {:status 404 :body "no app.js"})
-    [:post "/session/start"] (handle-session-start req)
+    [:get "/stream"]         (handle-stream req)
     [:post "/session/end"]   (handle-session-end req)
     [:get "/debug"]       {:status 200 :headers {"Content-Type" "application/json"}
                            :body (json/write-value-as-string

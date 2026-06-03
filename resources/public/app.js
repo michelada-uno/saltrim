@@ -40,13 +40,10 @@ function initSession() {
   window.__sid = sid;
   const box = document.getElementById('sidbox');
   if (box) { box.value = sid; box.dispatchEvent(new Event('input', {bubbles: true})); }
-  const sheet = new URLSearchParams(location.search).get('s') || 'default';
-
-  fetch('/session/start', {
-    method: 'POST', keepalive: true,
-    headers: {'content-type': 'application/json'},
-    body: JSON.stringify({sid: sid, sheet: sheet})
-  }).catch(function () {});
+  // open the persistent collaboration stream via Datastar (it processes the
+  // pushed patches); $sid is now set so the trigger's URL picks it up.
+  const trig = document.getElementById('streamtrigger');
+  if (trig) trig.click();
 
   window.addEventListener('pagehide', function () {
     try {
