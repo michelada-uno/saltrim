@@ -40,17 +40,24 @@
 (def ^:private MIN-ROWS 100)
 (def ^:private BUF-COLS 6)        ; scrollable buffer past used/visible range
 (def ^:private BUF-ROWS 30)
+(def ^:private BAR 12)            ; custom scrollbar thickness px
 
-(defn- xpos [ci] (+ GUT (* ci CW)))   ; cells/col-headers: left
-(defn- ypos [ri] (* ri RH))           ; cells/row-headers: top (col strip is separate)
+;; Logical scroll: no giant spacer. Cells/headers are positioned WINDOW-RELATIVE
+;; (cell at index i in the window sits at (i - base)*CW), and /app.js translates
+;; the layers by the sub-cell offset for smoothness + draws its own scrollbars.
+;; The window base is the first index rendered = max(0, c0-OVER).
+
+(defn- view-base
+  "[col-base row-base] = top-left index of the rendered (overscanned) window."
+  [{:keys [r0 c0]}]
+  [(max 0 (- (long c0) OVER)) (max 0 (- (long r0) OVER))])
 
 (defn- window
   "Visible cell coords [ci-range ri-range] for first row/col r0 c0 (clamped)."
   [r0 c0]
-  (let [c0 (max 0 (- (long c0) OVER))
-        r0 (max 0 (- (long r0) OVER))]
-    [(range c0 (min MAX-COLS (+ c0 WIN-COLS)))
-     (range r0 (min MAX-ROWS (+ r0 WIN-ROWS)))]))
+  (let [[cb rb] (view-base {:r0 r0 :c0 c0})]
+    [(range cb (min MAX-COLS (+ cb WIN-COLS)))
+     (range rb (min MAX-ROWS (+ rb WIN-ROWS)))]))
 
 ;; --- state --------------------------------------------------------------
 
@@ -139,14 +146,15 @@
                             [(max cm ci) (max rm ri)]))
           [-1 -1] (sheet/cells sh)))
 
-(defn- spacer-dims
-  "Spacer [w h] px: covers used range AND the current view, plus a buffer, so
-   the scrollbar extends just past real content but you can always scroll on."
+(defn- total-px
+  "Logical scroll extent [w h] px (cells area only, no gutter/header): covers the
+   used range and the current view plus a buffer. Just numbers for the custom
+   scrollbar — no DOM element is this big."
   [sh r0 c0]
   (let [[cm rm] (used-max sh)
         cols (min MAX-COLS (+ (max MIN-COLS (inc cm) (+ (long c0) WIN-COLS)) BUF-COLS))
         rows (min MAX-ROWS (+ (max MIN-ROWS (inc rm) (+ (long r0) WIN-ROWS)) BUF-ROWS))]
-    [(+ GUT (* cols CW)) (* rows RH)]))
+    [(* cols CW) (* rows RH)]))
 
 (defn- in-window? [{:keys [r0 c0]} addr]
   (let [{:keys [ci ri]} (addr/parse addr)]
@@ -162,59 +170,101 @@
 (defn- cell-id [a] (str "c_" a))
 
 (defn- cell-input
-  "Minimal per-cell HTML: class (shared CSS) + position only. Focus/blur/change
-   are delegated on #cells (handlers below), so cells stay tiny -> small SSE."
-  [sh a ci ri]
+  "Minimal per-cell HTML, positioned WINDOW-RELATIVE to (cbase,rbase). Class +
+   position only; focus/blur/change are delegated on #cells."
+  [sh a ci ri cbase rbase]
   (let [disp (display sh a)
         raw  (or (sheet/raw sh a) disp)]
     [:input {:id (cell-id a) :class "cell"
              :value disp :data-raw raw :data-val disp
-             :style (format "left:%dpx;top:%dpx" (xpos ci) (ypos ri))}]))
+             :style (format "left:%dpx;top:%dpx" (* (- ci cbase) CW) (* (- ri rbase) RH))}]))
 
 (defn- cells-html [sh cis ris]
-  (str (h/html (for [ri ris ci cis] (cell-input sh (addr/make ci ri) ci ri)))))
+  (let [cb (first cis) rb (first ris)]
+    (str (h/html (for [ri ris ci cis] (cell-input sh (addr/make ci ri) ci ri cb rb))))))
 
 (defn- colhead-html [cis]
-  (str (h/html
-        (for [ci cis]
-          [:div {:style (format (str "position:absolute;left:%dpx;top:0;width:%dpx;height:%dpx;"
-                                     "line-height:%dpx;text-align:center;background:#f3f3f3;"
-                                     "border:1px solid #e0e0e0;font:12px sans-serif;")
-                                (xpos ci) CW HDR HDR)}
-           (addr/idx->col ci)]))))
+  (let [cb (first cis)]
+    (str (h/html
+          (for [ci cis]
+            [:div {:style (format (str "position:absolute;left:%dpx;top:0;width:%dpx;height:%dpx;"
+                                       "line-height:%dpx;text-align:center;background:#f3f3f3;"
+                                       "border:1px solid #e0e0e0;font:12px sans-serif;box-sizing:border-box;")
+                                  (* (- ci cb) CW) CW HDR HDR)}
+             (addr/idx->col ci)])))))
 
 (defn- rowhead-html [ris]
-  (str (h/html
-        (for [ri ris]
-          [:div {:style (format (str "position:absolute;left:0;top:%dpx;width:%dpx;height:%dpx;"
-                                     "line-height:%dpx;text-align:center;background:#f3f3f3;"
-                                     "border:1px solid #e0e0e0;font:12px sans-serif;")
-                                (ypos ri) GUT RH RH)}
-           (inc ri)]))))
+  (let [rb (first ris)]
+    (str (h/html
+          (for [ri ris]
+            [:div {:style (format (str "position:absolute;left:0;top:%dpx;width:%dpx;height:%dpx;"
+                                       "line-height:%dpx;text-align:center;background:#f3f3f3;"
+                                       "border:1px solid #e0e0e0;font:12px sans-serif;box-sizing:border-box;")
+                                  (* (- ri rb) RH) GUT RH RH)}
+             (inc ri)])))))
+
+(defn- meta-html
+  "Hidden element carrying, to /app.js: the logical scroll totals (size the
+   scrollbars) and the rendered window's base index cb/rb. /app.js translates the
+   layers relative to cb/rb — patched together with #cells, so the transform
+   always matches the displayed content (no jump while a fetch is in flight)."
+  [sh r0 c0]
+  (let [[tw th] (total-px sh r0 c0)
+        [cb rb] (view-base {:r0 r0 :c0 c0})]
+    (str (h/html [:div {:id "meta" :data-tw tw :data-th th :data-cb cb :data-rb rb
+                        :style "display:none;"}]))))
 
 (defn- grid-layers
-  "Inner content of #scroll: sticky headers + a dynamically-sized spacer +
-   the visible window. Spacer grows with used range / view, not a fixed huge
-   sheet. Delegation handlers live on #scroll (parent), so re-rendering this
-   does not drop them."
-  [sh {:keys [r0 c0]}]
+  "Logical-scroll viewport: fixed-size, overflow hidden. Clipped header strips +
+   a cell area, each holding an absolutely-positioned layer that /app.js
+   translates by the sub-cell offset. Plus the corner, the totals #meta, and two
+   custom scrollbars. No giant spacer -> no row cap, no precision wobble."
+  [sh {:keys [r0 c0] :as view}]
   (let [[cis ris] (window r0 c0)
-        [w h] (spacer-dims sh r0 c0)]
+        clip "position:absolute;overflow:hidden;"]
     (h/html
-     [:div {:id "colstrip"
-            :style (format (str "position:sticky;top:0;z-index:2;height:%dpx;width:%dpx;"
-                                "background:#f3f3f3;") HDR w)}
+     [:div {:id "viewport"
+            :data-cw CW :data-rh RH :data-gut GUT :data-hdr HDR
+            :data-over OVER :data-bar BAR
+            ;; delegated cell handlers (focus/blur don't bubble -> focusin/out)
+            :data-on:focusin
+            (str "evt.target.classList.contains('cell') && "
+                 "($sel=evt.target.id.slice(2), $bar=evt.target.dataset.raw, "
+                 "evt.target.value=evt.target.dataset.raw)")
+            :data-on:focusout
+            "evt.target.classList.contains('cell') && (evt.target.value=evt.target.dataset.val)"
+            :data-on:change
+            (str "evt.target.classList.contains('cell') && "
+                 "($cell=evt.target.id.slice(2), $v=evt.target.value, $bar=$v, @post('/cell'))")
+            :style "position:relative;height:78vh;border:1px solid #ccc;overflow:hidden;"}
+      (h/raw (meta-html sh r0 c0))
+      ;; corner
       [:div {:id "corner"
-             :style (format (str "position:sticky;left:0;z-index:3;width:%dpx;height:%dpx;"
-                                 "background:#e8e8e8;display:inline-block;") GUT HDR)}]
-      [:div {:id "colhead"} (h/raw (colhead-html cis))]]
-     [:div {:id "space"
-            :style (format "position:relative;width:%dpx;height:%dpx;" w h)}
-      [:div {:id "rowstrip"
-             :style (format (str "position:sticky;left:0;z-index:1;width:%dpx;height:%dpx;"
-                                 "background:#f3f3f3;float:left;") GUT h)}
-       [:div {:id "rowhead"} (h/raw (rowhead-html ris))]]
-      [:div {:id "cells"} (h/raw (cells-html sh cis ris))]])))
+             :style (format (str "position:absolute;left:0;top:0;z-index:4;width:%dpx;height:%dpx;"
+                                 "background:#e8e8e8;border:1px solid #e0e0e0;box-sizing:border-box;")
+                            GUT HDR)}]
+      ;; column header strip (clipped; translated in X)
+      [:div {:id "colclip" :style (format "%sleft:%dpx;top:0;right:%dpx;height:%dpx;z-index:3;"
+                                          clip GUT BAR HDR)}
+       [:div {:id "colstrip" :style "position:absolute;left:0;top:0;will-change:transform;"}
+        [:div {:id "colhead"} (h/raw (colhead-html cis))]]]
+      ;; row header strip (clipped; translated in Y)
+      [:div {:id "rowclip" :style (format "%sleft:0;top:%dpx;bottom:%dpx;width:%dpx;z-index:3;"
+                                          clip HDR BAR GUT)}
+       [:div {:id "rowstrip" :style "position:absolute;left:0;top:0;will-change:transform;"}
+        [:div {:id "rowhead"} (h/raw (rowhead-html ris))]]]
+      ;; cell area (clipped; translated in X+Y)
+      [:div {:id "cellclip" :style (format "%sleft:%dpx;top:%dpx;right:%dpx;bottom:%dpx;"
+                                           clip GUT HDR BAR BAR)}
+       [:div {:id "cells" :style "position:absolute;left:0;top:0;will-change:transform;"}
+        (h/raw (cells-html sh cis ris))]]
+      ;; custom scrollbars
+      [:div {:id "vbar" :style (format (str "position:absolute;right:0;top:%dpx;bottom:%dpx;width:%dpx;"
+                                            "background:#f0f0f0;z-index:5;") HDR BAR BAR)}
+       [:div {:id "vthumb" :style "position:absolute;left:1px;right:1px;top:0;height:30px;background:#bbb;border-radius:6px;"}]]
+      [:div {:id "hbar" :style (format (str "position:absolute;left:%dpx;bottom:0;right:%dpx;height:%dpx;"
+                                            "background:#f0f0f0;z-index:5;") GUT BAR BAR)}
+       [:div {:id "hthumb" :style "position:absolute;top:1px;bottom:1px;left:0;width:30px;background:#bbb;border-radius:6px;"}]]])))
 
 (defn- page [sh id]
   (str
@@ -260,23 +310,13 @@
                 :data-on:blur "$cell=$sel, $v=$bar, @post('/cell')"
                 :style (str "flex:1;font:13px monospace;padding:5px 8px;border:1px solid #bbb;"
                             "border-radius:4px;")}]]
-      ;; scroll viewport. Delegated cell handlers live here (parent of #cells)
-      ;; so re-rendering the grid inner keeps them. focus/blur use focusin/out.
-      [:div {:id "scroll"
-             :data-cw CW :data-rh RH :data-gut GUT     ; geometry for /app.js
-             :data-on:scroll__debounce.120ms
-             (format "$r0=Math.floor(el.scrollTop/%d); $c0=Math.floor(el.scrollLeft/%d); @post('/view')" RH CW)
-             :data-on:focusin
-             (str "evt.target.classList.contains('cell') && "
-                  "($sel=evt.target.id.slice(2), $bar=evt.target.dataset.raw, "
-                  "evt.target.value=evt.target.dataset.raw)")
-             :data-on:focusout
-             "evt.target.classList.contains('cell') && (evt.target.value=evt.target.dataset.val)"
-             :data-on:change
-             (str "evt.target.classList.contains('cell') && "
-                  "($cell=evt.target.id.slice(2), $v=evt.target.value, $bar=$v, @post('/cell'))")
-             :style "height:78vh;overflow:auto;border:1px solid #ccc;position:relative;"}
-       (grid-layers sh {:r0 0 :c0 0})]]])))
+      ;; hidden r0/c0 carriers (/app.js sets these then clicks #viewtrigger so
+      ;; Datastar @post /view and applies the returned window patch).
+      [:input {:id "r0box" :data-bind:r0 "" :style "display:none;"}]
+      [:input {:id "c0box" :data-bind:c0 "" :style "display:none;"}]
+      [:button {:id "viewtrigger" :data-on:click "@post('/view')" :style "display:none;"} ""]
+      ;; logical-scroll viewport (custom wheel + scrollbars in /app.js)
+      (grid-layers sh {:r0 0 :c0 0})]])))
 
 ;; --- SSE (official Datastar SDK) ----------------------------------------
 
@@ -322,20 +362,24 @@
 (defn- close-gen! [s]
   (when-let [g (:gen s)] (try (d*/close-sse! g) (catch Throwable _))))
 
-(defn- render-cells [sh addrs]
-  (apply str (map #(str (h/html (cell-input sh % (:ci (addr/parse %)) (:ri (addr/parse %)))))
-                  addrs)))
+(defn- render-cells
+  "Cell-input HTML for addrs, positioned window-relative to view (cbase,rbase)."
+  [sh addrs view]
+  (let [[cb rb] (view-base view)]
+    (apply str (map #(let [{:keys [ci ri]} (addr/parse %)]
+                       (str (h/html (cell-input sh % ci ri cb rb))))
+                    addrs))))
 
 (defn- broadcast!
   "Push changed cells to OTHER sessions on the same sheet, each scoped to that
-   session's own viewport. Collaboration: a peer sees your edit live. A write to
-   a dead stream throws -> reap that session."
+   session's own viewport (so coords match their window). A write to a dead
+   stream throws -> reap that session."
   [editor-sid sheet-id sh affected]
   (doseq [[sid s] @sessions*]
     (when (and (not= sid editor-sid) (= sheet-id (:sheet s)) (:gen s))
       (let [vis (filter #(in-window? (:view s) %) affected)]
         (when (seq vis)
-          (try (d*/lock-sse! (:gen s) (d*/patch-elements! (:gen s) (render-cells sh vis)))
+          (try (d*/lock-sse! (:gen s) (d*/patch-elements! (:gen s) (render-cells sh vis (:view s))))
                (catch Throwable _ (reap-session! sid))))))))
 
 (defn- handle-cell [req]
@@ -360,7 +404,7 @@
                                affected)]
                 ;; editor: immediate feedback on this one-shot response
                 (when (seq visible)
-                  (d*/patch-elements! gen (render-cells sh visible)))
+                  (d*/patch-elements! gen (render-cells sh visible view)))
                 (signals! gen {:err (if (seq errs) (str/join "; " errs) "")})
                 ;; collaborators: push the same change to their streams
                 (broadcast! sid sheet-id sh affected))
@@ -376,16 +420,14 @@
     (set-session-view! sid view)
     (sse req
       (fn [gen]
-        (let [new-dims (spacer-dims sh (:r0 view) (:c0 view))]
-          (if (= (session-dims sid) new-dims)
-            ;; bounds unchanged: cheap inner patch of window + headers
-            (let [[cis ris] (window (:r0 view) (:c0 view))]
-              (patch-inner! gen "#cells"   (cells-html sh cis ris))
-              (patch-inner! gen "#colhead" (colhead-html cis))
-              (patch-inner! gen "#rowhead" (rowhead-html ris)))
-            ;; bounds grew (reached edge / jumped): re-render grid (resizes spacer).
-            (do (set-session-dims! sid new-dims)
-                (patch-inner! gen "#scroll" (str (grid-layers sh view))))))))))
+        ;; logical scroll: always cheap inner patches. The window is positioned
+        ;; relative to (c0,r0); /app.js translates + sizes the scrollbars from
+        ;; #meta totals (no giant spacer to resize).
+        (let [[cis ris] (window (:r0 view) (:c0 view))]
+          (patch-inner! gen "#cells"   (cells-html sh cis ris))
+          (patch-inner! gen "#colhead" (colhead-html cis))
+          (patch-inner! gen "#rowhead" (rowhead-html ris))
+          (d*/patch-elements! gen (meta-html sh (:r0 view) (:c0 view))))))))  ; #meta by id
 
 ;; Session lifecycle. The persistent /stream registers the session and stores
 ;; its push generator (server -> client collaboration channel). Cleanup never
@@ -443,7 +485,13 @@
     [:get "/debug"]       {:status 200 :headers {"Content-Type" "application/json"}
                            :body (json/write-value-as-string
                                   {:sessions (count @sessions*)
-                                   :loaded-sheets (vec (keys @sheets*))})}
+                                   :loaded-sheets (vec (keys @sheets*))
+                                   :detail (mapv (fn [[sid s]]
+                                                   {:sid (subs sid 0 (min 6 (count sid)))
+                                                    :sheet (:sheet s)
+                                                    :gen? (boolean (:gen s))
+                                                    :view (:view s)})
+                                                 @sessions*)})}
     [:post "/cell"]       (handle-cell req)
     [:post "/view"]       (handle-view req)
     {:status 404 :body "not found"}))

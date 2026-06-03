@@ -1,6 +1,21 @@
 # Tech debt
 
-## Scroll model — replace the giant spacer div
+## Scroll model — DONE (logical scroll)
+
+Replaced the giant-spacer native scroll with a logical-scroll engine (no sized
+div): /app.js keeps a logical pixel position (SX,SY), translates the window
+layers by the offset for smoothness, draws custom scrollbars, and fetches a new
+window (POST /view) only when the top-left cell index changes. Cells are
+positioned window-relative; the window base (cb/rb) ships in #meta alongside
+#cells so the transform always matches the displayed content (no jump while a
+fetch is in flight). Row cap and scrollbar-precision issues are gone.
+
+Follow-ups: keyboard nav (arrows/pgup) not wired; WIN-COLS/ROWS are fixed
+(generous) rather than computed from viewport size; momentum/trackpad feel is
+raw deltas (could smooth). The notes below are the original analysis, kept for
+context.
+
+### (original) giant spacer analysis
 
 Current viewport uses a "fake-scroll" spacer: one `<div id="space">` sized to the
 logical sheet (`cols*CW × rows*RH`) so the native scrollbar reflects the sheet
