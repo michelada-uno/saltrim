@@ -2,11 +2,9 @@
 
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
 
-        ;; Reactive core. Git dep — transitive deps (partial-cps, yggdrasil,
-        ;; hasch, core.async, anglican, kabel) resolve from spindel's deps.edn.
-        org.replikativ/spindel
-        {:git/url "https://github.com/replikativ/spindel"
-         :git/sha "28a07db3da8f8a4bd462c039c993baa3bb9211e2"}
+        ;; Reactive core. Clojars release (was a git sha pin; 0.1.15 is one
+        ;; commit ahead of that pin — a retention/leak fix, no API change).
+        org.replikativ/spindel {:mvn/version "0.1.15"}
 
         ;; SCI for sandboxed runtime formula eval (Step 4).
         org.babashka/sci {:mvn/version "0.8.43"}
