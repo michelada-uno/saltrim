@@ -10,7 +10,8 @@ positioned window-relative; the window base (cb/rb) ships in #meta alongside
 #cells so the transform always matches the displayed content (no jump while a
 fetch is in flight). Row cap and scrollbar-precision issues are gone.
 
-Follow-ups: keyboard nav (arrows/pgup) not wired; WIN-COLS/ROWS are fixed
+Follow-ups: keyboard nav DONE (arrows/Tab/Enter move selection, Enter/dblclick
+edit — see web layer); PgUp/PgDn/Home/End not yet wired; WIN-COLS/ROWS are fixed
 (generous) rather than computed from viewport size; momentum/trackpad feel is
 raw deltas (could smooth). The notes below are the original analysis, kept for
 context.

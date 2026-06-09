@@ -121,8 +121,25 @@ that the client `translate`s.
 - Geometry constants: `CW=112 RH=26 GUT=48 HDR=26 OVER=2 WIN-COLS=16 WIN-ROWS=34
   BAR=12`. `MAX-COLS=16384 MAX-ROWS=600000` (coordinate clamp). Empty cells cost
   nothing (absent from registry → no spin).
-- Per-cell HTML is tiny: a `.cell` class + `left/top` only. Focus/blur/change are
-  **delegated on `#viewport`** (`focusin/focusout` since focus doesn't bubble).
+- Per-cell HTML is a tiny **display `<div>`** (not an input): `.cell` class,
+  `left/top`, `data-raw` (source for the editor), text = value. No ~500 live
+  inputs. Selection/edit are delegated on `#viewport`.
+
+### Cell interaction & editing
+
+- **Single click = select only** (`data-on:click` → `$sel`, presence cursor). No
+  editing, no lock.
+- **Edit** opens a single floating `#editor` input over the active cell, on
+  **double-click** (`data-on:dblclick` → `startEdit`) or **Enter** (keyboard).
+  Committed on **Enter / blur / double-click**, cancelled on **Esc**. `app.js`
+  positions/shows/hides it and wires its keydown/blur (real listeners — Datastar
+  `data-on:keydown` proved unreliable on synthetic events; the editor's keydown
+  `stopPropagation`s so the doc-level nav handler doesn't re-open it). The actual
+  posts stay Datastar: hidden `#selecttrigger`/`#edittrigger`/`#celltrigger`
+  buttons (`@post '/presence'` / `'/cell'`); `#editor` is `data-bind:v`.
+- **Keyboard navigation** (`onKey`, document-level): arrows / Tab move `$sel`
+  (scrolling it into view via `ensureVisible`); Enter opens the editor. Ignored
+  while editing or when a toolbar input is focused.
 
 ### Client engine (`app.js`)
 
@@ -186,8 +203,10 @@ mid-edit). Two absolutely-positioned layers inside `#cellclip`, translated with
 
 - **Presence state**: each session has a deterministic `:color` (hashed sid),
   `:cursor` (the cell it is on) and `:editing` (the cell it is actively editing,
-  else nil). The client posts presence **declaratively via Datastar**
-  (`@post('/presence')` in the cell `data-on:focusin`/`focusout` and the formula
+  else nil). Presence is posted via Datastar `@post('/presence')` — on cell
+  **click** (`$edit=false`, cursor), on **starting an edit** (`$edit=true`, lock,
+  via `#edittrigger`), on **commit/cancel** (`$edit=false`, via `#selecttrigger`),
+  and from the formula
   bar's `data-on:focus`/`blur`), carrying signals `$sel` and `$edit`. `jump`
   clicks a hidden `#presencetrigger`. `handle-presence` updates the session, then
   patches **this** session's `#self` back on the `@post` response and
@@ -240,7 +259,7 @@ To cut a release: `git tag v1.2.3 && git push origin v1.2.3`.
 
 ## Known limitations
 
-See `TECHDEBT.md`. Highlights: keyboard nav not wired; `WIN-COLS/ROWS` fixed
+See `TECHDEBT.md`. Highlights: `WIN-COLS/ROWS` fixed
 (not viewport-computed); last-write-wins (no merge); session-less sheets loaded
 by a bare `GET /` aren't swept; `/debug` is ungated; concurrent simultaneous
 edits can race a transient `#ERR`.

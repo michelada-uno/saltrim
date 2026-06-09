@@ -190,14 +190,16 @@
 (defn- cell-id [a] (str "c_" a))
 
 (defn- cell-input
-  "Minimal per-cell HTML, positioned WINDOW-RELATIVE to (cbase,rbase). Class +
-   position only; focus/blur/change are delegated on #cells."
+  "Minimal per-cell HTML: a DISPLAY div (not an input), positioned WINDOW-RELATIVE
+   to (cbase,rbase). data-raw carries the source for the floating editor. A single
+   click selects; Enter/double-click opens the editor (handled in /app.js). No
+   per-cell input -> no 500 live <input>s."
   [sh a ci ri cbase rbase]
   (let [disp (display sh a)
         raw  (or (sheet/raw sh a) disp)]
-    [:input {:id (cell-id a) :class "cell"
-             :value disp :data-raw raw :data-val disp
-             :style (format "left:%dpx;top:%dpx" (* (- ci cbase) CW) (* (- ri rbase) RH))}]))
+    [:div {:id (cell-id a) :class "cell" :data-raw raw
+           :style (format "left:%dpx;top:%dpx" (* (- ci cbase) CW) (* (- ri rbase) RH))}
+     disp]))
 
 (defn- cells-html [sh cis ris]
   (let [cb (first cis) rb (first ris)]
@@ -246,19 +248,15 @@
      [:div {:id "viewport"
             :data-cw CW :data-rh RH :data-gut GUT :data-hdr HDR
             :data-over OVER :data-bar BAR
-            ;; delegated cell handlers (focus/blur don't bubble -> focusin/out).
-            ;; Presence is posted declaratively (@post '/presence') — the server
-            ;; renders the selection (#self) and collaborator (#peers) overlays.
-            :data-on:focusin
+            ;; delegated cell handlers. Single click = SELECT only (no edit);
+            ;; double-click = open the floating editor (/app.js). Selection posts
+            ;; presence declaratively (@post '/presence'); the server renders the
+            ;; #self and #peers overlays. Keyboard nav + editor live in /app.js.
+            :data-on:click
             (str "evt.target.classList.contains('cell') && "
-                 "($sel=evt.target.id.slice(2), $bar=evt.target.dataset.raw, "
-                 "evt.target.value=evt.target.dataset.raw, $edit=true, @post('/presence'))")
-            :data-on:focusout
-            (str "evt.target.classList.contains('cell') && "
-                 "(evt.target.value=evt.target.dataset.val, $edit=false, @post('/presence'))")
-            :data-on:change
-            (str "evt.target.classList.contains('cell') && "
-                 "($cell=evt.target.id.slice(2), $v=evt.target.value, $bar=$v, @post('/cell'))")
+                 "($sel=evt.target.id.slice(2), $edit=false, @post('/presence'))")
+            :data-on:dblclick
+            "evt.target.classList.contains('cell') && startEdit(evt.target.id.slice(2))"
             :style "position:relative;height:78vh;border:1px solid #ccc;overflow:hidden;"}
       (h/raw (meta-html sh r0 c0))
       ;; corner
@@ -290,7 +288,13 @@
        ;; container ignores pointer events — only an editing marker re-enables
        ;; them to block the cell beneath.
        [:div {:id "peers" :style (str "position:absolute;left:0;top:0;z-index:3;"
-                                      "pointer-events:none;will-change:transform;")}]]
+                                      "pointer-events:none;will-change:transform;")}]
+       ;; the single floating editor, translated with #cells; /app.js positions +
+       ;; shows it over the active cell on Enter/double-click and wires its
+       ;; keydown/blur/dblclick. data-bind:v feeds the value into $v; commit posts
+       ;; /cell via #celltrigger, Esc cancels.
+       [:div {:id "editlayer" :style "position:absolute;left:0;top:0;will-change:transform;"}
+        [:input {:id "editor" :data-bind:v ""}]]]
       ;; custom scrollbars
       [:div {:id "vbar" :style (format (str "position:absolute;right:0;top:%dpx;bottom:%dpx;width:%dpx;"
                                             "background:#f0f0f0;z-index:5;") HDR BAR BAR)}
@@ -309,11 +313,17 @@
       [:title "calcloj"]
       [:style (h/raw
                (str
-                ;; cell sizing (geometry-driven -> format)
-                (format (str "input.cell{position:absolute;width:%dpx;height:%dpx;"
-                             "box-sizing:border-box;border:1px solid #ddd;"
-                             "padding:2px 4px;font:13px monospace;}")
-                        (- CW 1) (- RH 1))
+                ;; cell sizing (geometry-driven -> format). Cells are DISPLAY
+                ;; divs; a single floating #editor input handles editing.
+                (format (str "div.cell{position:absolute;width:%dpx;height:%dpx;"
+                             "box-sizing:border-box;border:1px solid #ddd;background:#fff;"
+                             "padding:2px 4px;font:13px monospace;line-height:%dpx;"
+                             "overflow:hidden;white-space:nowrap;text-overflow:clip;"
+                             "cursor:cell;user-select:none;}"
+                             "#editor{position:absolute;width:%dpx;height:%dpx;"
+                             "box-sizing:border-box;border:2px solid #1a73e8;background:#fff;"
+                             "padding:1px 3px;font:13px monospace;z-index:6;display:none;}")
+                        (- CW 1) (- RH 1) (- RH 5) (- CW 1) (- RH 1))
                 ;; --- selection / editing OVERLAY (#self), server-rendered.
                 ;; literal % (gradients) -> kept outside the format call.
                 ;; calm "you are here" selection box
@@ -380,9 +390,14 @@
       [:input {:id "r0box" :data-bind:r0 "" :style "display:none;"}]
       [:input {:id "c0box" :data-bind:c0 "" :style "display:none;"}]
       [:button {:id "viewtrigger" :data-on:click "@post('/view')" :style "display:none;"} ""]
-      ;; /app.js clicks this after a jump (address-box navigation) to post the new
-      ;; selection as presence — the server moves the #self overlay to it.
-      [:button {:id "presencetrigger" :data-on:click "$edit=false, @post('/presence')"
+      ;; hidden triggers /app.js clicks to drive Datastar actions (it can't set
+      ;; signals directly): selecting (cursor presence), starting an edit (lock),
+      ;; and committing a cell value. $sel comes from #addrbox, $v from #editor.
+      [:button {:id "selecttrigger" :data-on:click "$edit=false, @post('/presence')"
+                :style "display:none;"} ""]
+      [:button {:id "edittrigger" :data-on:click "$edit=true, @post('/presence')"
+                :style "display:none;"} ""]
+      [:button {:id "celltrigger" :data-on:click "$cell=$sel, @post('/cell')"
                 :style "display:none;"} ""]
       ;; logical-scroll viewport (custom wheel + scrollbars in /app.js)
       (grid-layers sh {:r0 0 :c0 0})]])))

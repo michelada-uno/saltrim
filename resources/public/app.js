@@ -33,6 +33,7 @@ function render() {
   setT('cells', tx, ty);
   setT('self', tx, ty);      // own selection/editing overlay tracks the cell layer
   setT('peers', tx, ty);     // collaborator overlay tracks the cell layer
+  setT('editlayer', tx, ty); // floating editor tracks the cell layer
   setT('colstrip', tx, 0);
   setT('rowstrip', 0, ty);
   thumb('vbar', 'vthumb', SY, m.th, true);
@@ -100,25 +101,123 @@ function dragThumb(barId, thumbId, vertical) {
   });
 }
 
+// --- address <-> index helpers ---------------------------------------------
+function colToIdx(s) { let c = 0; for (const ch of s) c = c * 26 + (ch.charCodeAt(0) - 64); return c - 1; }
+function idxToCol(i) { let n = i + 1, o = ''; while (n > 0) { const r = (n - 1) % 26; o = String.fromCharCode(65 + r) + o; n = (n - 1 - r) / 26; } return o; }
+function parseAddr(a) { const m = String(a).toUpperCase().match(/^([A-Z]+)(\d+)$/); return m ? {ci: colToIdx(m[1]), ri: parseInt(m[2], 10) - 1} : null; }
+function makeAddr(ci, ri) { return idxToCol(ci) + (ri + 1); }
+function curSel() { const b = $('addrbox'); return b && b.value ? b.value.toUpperCase() : null; }
+
+// --- selection (server-rendered #self) -------------------------------------
+// $sel lives in the address box (data-bind:sel). We set it and click a hidden
+// Datastar trigger so the server moves the #self overlay; the client only keeps
+// the selected cell scrolled into view.
+function setSelValue(addr) {   // set $sel only (no presence post)
+  const b = $('addrbox'); if (b) { b.value = addr; b.dispatchEvent(new Event('input', {bubbles: true})); }
+}
+function setSel(addr) {        // set $sel + post selection presence (cursor, edit=false)
+  setSelValue(addr);
+  const t = $('selecttrigger'); if (t) t.click();
+}
+
+function ensureVisible(addr) {
+  const p = parseAddr(addr); if (!p) return;
+  const g = geo(), vs = viewSize();
+  const x = p.ci * g.CW, y = p.ri * g.RH;
+  if (x < SX) SX = x; else if (x + g.CW > SX + vs.w) SX = x + g.CW - vs.w;
+  if (y < SY) SY = y; else if (y + g.RH > SY + vs.h) SY = y + g.RH - vs.h;
+  SX = Math.max(0, SX); SY = Math.max(0, SY);
+  render(); requestView(false);
+}
+
 function jump(addr) {
-  addr = String(addr).toUpperCase();
-  const m = addr.match(/^([A-Z]+)(\d+)$/); if (!m) return;
+  const p = parseAddr(addr); if (!p) return;
   const g = geo();
-  let ci = 0; for (const ch of m[1]) ci = ci * 26 + (ch.charCodeAt(0) - 64); ci -= 1;
-  const ri = parseInt(m[2], 10) - 1;
-  SX = ci * g.CW; SY = ri * g.RH;          // no clamp: /view extends totals to cover
-  // selection + presence are server-rendered: $sel is already bound from the
-  // address box; nudge the server to move the #self overlay to it.
-  const pt = $('presencetrigger'); if (pt) pt.click();
+  SX = p.ci * g.CW; SY = p.ri * g.RH;     // park target at top-left; /view extends totals
+  setSel(makeAddr(p.ci, p.ri));
   render(); requestView(true);
 }
 window.jump = jump;
 
-// Selection (#self) and collaborator (#peers) overlays are SERVER-RENDERED.
-// Cell focus/blur and the formula bar post presence declaratively via Datastar
-// (@post '/presence' in their data-on handlers); the server moves the overlays.
-// No client-side class toggling here — the only client concern is keeping the
-// overlay layers translated with #cells (handled in render()).
+// --- the single floating editor --------------------------------------------
+// Cells are display divs; editing happens in one #editor input positioned over
+// the active cell. Opened on Enter / double-click; committed on Enter / blur /
+// double-click; cancelled on Esc. Datastar does the posts (hidden triggers);
+// /app.js only positions/shows/hides and guards re-entrant blur.
+let _editing = false;
+
+function startEdit(addr) {
+  const p = parseAddr(addr); if (!p) return;
+  addr = makeAddr(p.ci, p.ri);
+  setSelValue(addr); ensureVisible(addr);   // set $sel; the edittrigger below posts presence (edit=true)
+  const g = geo(), m = meta(), ed = $('editor'), cell = $('c_' + addr);
+  ed.style.left = ((p.ci - m.cb) * g.CW) + 'px';
+  ed.style.top  = ((p.ri - m.rb) * g.RH) + 'px';
+  ed.value = cell ? (cell.dataset.raw || '') : '';
+  ed.dispatchEvent(new Event('input', {bubbles: true}));   // -> $v
+  ed.style.display = 'block';
+  _editing = true;
+  ed.focus(); ed.select();
+  const t = $('edittrigger'); if (t) t.click();            // presence edit=true (lock)
+}
+function hideEditor() { const ed = $('editor'); if (ed) { _editing = false; ed.style.display = 'none'; } }
+function commitEdit() {
+  if (!_editing) return;                                   // guard re-entrant blur
+  _editing = false;
+  const ct = $('celltrigger'); if (ct) ct.click();         // @post /cell ($cell=$sel, $v)
+  hideEditor();
+  const st = $('selecttrigger'); if (st) st.click();       // presence edit=false
+}
+function cancelEdit() {
+  if (!_editing) return;
+  hideEditor();
+  const st = $('selecttrigger'); if (st) st.click();
+}
+window.startEdit = startEdit; window.commitEdit = commitEdit; window.cancelEdit = cancelEdit;
+
+// --- keyboard navigation ----------------------------------------------------
+// Arrows / Tab move the selection; Enter opens the editor. Ignored while editing
+// (the editor owns its keys) or when a toolbar input is focused.
+function onKey(e) {
+  if (_editing) return;
+  const ae = document.activeElement;
+  if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA') && ae.id !== 'editor') return;
+  const sel = curSel();
+  if (!sel) {
+    if (['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown', 'Tab', 'Enter'].includes(e.key)) {
+      e.preventDefault(); setSel('A1'); ensureVisible('A1');
+    }
+    return;
+  }
+  const p = parseAddr(sel); let ci = p.ci, ri = p.ri;
+  switch (e.key) {
+    case 'ArrowRight': ci++; break;
+    case 'ArrowLeft':  ci = Math.max(0, ci - 1); break;
+    case 'ArrowDown':  ri++; break;
+    case 'ArrowUp':    ri = Math.max(0, ri - 1); break;
+    case 'Tab':        ci = e.shiftKey ? Math.max(0, ci - 1) : ci + 1; break;
+    case 'Enter':      e.preventDefault(); startEdit(sel); return;
+    default: return;
+  }
+  e.preventDefault();
+  const na = makeAddr(ci, ri);
+  setSel(na); ensureVisible(na);
+}
+
+function initEditor() {
+  const ed = $('editor'); if (!ed || ed.__init) return;
+  ed.__init = true;
+  // wired in JS (not Datastar inline) so it fires reliably; the actual /cell post
+  // is still Datastar (commitEdit clicks the #celltrigger @post button).
+  ed.addEventListener('keydown', function (e) {
+    // stop the event reaching the document-level nav handler (which would
+    // otherwise re-open the editor on the same Enter once we've committed).
+    if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); commitEdit(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelEdit(); }
+  });
+  ed.addEventListener('blur', function () { commitEdit(); });
+  ed.addEventListener('dblclick', function () { commitEdit(); });
+}
 
 function initScroll() {
   const v = $('viewport'); if (!v || v.__scrollInit) return;
@@ -127,6 +226,8 @@ function initScroll() {
   dragThumb('vbar', 'vthumb', true);
   dragThumb('hbar', 'hthumb', false);
   window.addEventListener('resize', render);
+  document.addEventListener('keydown', onKey);
+  initEditor();
   render();  // page already rendered the window at (0,0)
 }
 
