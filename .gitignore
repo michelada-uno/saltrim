@@ -7,3 +7,7 @@
 /.clj-kondo/
 /.nrepl-port
 /data
+
+# Node tooling (typescript-lsp MCP installs here) — never commit
+/node_modules
+package-lock.json

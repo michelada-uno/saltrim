@@ -177,6 +177,44 @@ that the client `translate`s.
   capped backoff (reset on `started`). `/stream` on-open keeps an existing
   session's view and just swaps in the new generator.
 
+### Presence & edit locking
+
+Selection and presence are **server-rendered overlays** — no per-cell client JS,
+no class-toggling on the cell `<input>`s (which would clobber the caret
+mid-edit). Two absolutely-positioned layers inside `#cellclip`, translated with
+`#cells` by `app.js`: `#self` (this user) and `#peers` (everyone else).
+
+- **Presence state**: each session has a deterministic `:color` (hashed sid),
+  `:cursor` (the cell it is on) and `:editing` (the cell it is actively editing,
+  else nil). The client posts presence **declaratively via Datastar**
+  (`@post('/presence')` in the cell `data-on:focusin`/`focusout` and the formula
+  bar's `data-on:focus`/`blur`), carrying signals `$sel` and `$edit`. `jump`
+  clicks a hidden `#presencetrigger`. `handle-presence` updates the session, then
+  patches **this** session's `#self` back on the `@post` response and
+  re-broadcasts `#peers` to everyone (`broadcast-presence!`).
+- **`#self` overlay** (`self-html`), two tiers, rendered from the session's
+  `:cursor`/`:editing`, `pointer-events:none` (never blocks typing):
+  - selected ("you are here") — a calm `.selfcell` border that persists when
+    focus moves to the formula bar (the box stays on `:cursor`).
+  - editing now — `.selfcell.editing`: an **animated "marching-ants"** blue dashed
+    border (four gradient edges whose `background-position` scrolls via the
+    `cc-ants` keyframes). Honors `prefers-reduced-motion`.
+  The highlight moves on a server round-trip (ms); the native input `:focus`
+  outline gives instant feedback in the meantime.
+- **`#peers` overlay** (`peers-html`/`peer-marker`): markers for every *other*
+  session whose cursor is in this viewer's window, positioned window-relative to
+  *that* viewer's view. A non-editing marker is `pointer-events:none` (just a
+  cursor); an **editing** marker is `pointer-events:auto` with a translucent
+  fill, so it **covers and locks** the cell beneath (you cannot focus it).
+- **Edit lock (server guard)**: `/cell` rejects a write when another session's
+  `:editing` equals the target cell (`locked-by-other?`) → `#ERR`-style toast
+  "cell is being edited by another collaborator". Belt-and-suspenders with the
+  client overlay lock.
+- Overlays refresh on `/presence`, on a viewer's `/view` (re-render `#self` +
+  `#peers` for the new window), on `/stream` open (reconnect restores `#self`,
+  newcomer sees existing cursors), and on `reap-session!` (departed cursor
+  disappears).
+
 ## Tests
 
 `clojure -X:test` — `addr`, `engine` (literals, chains, ranges, formula-over-

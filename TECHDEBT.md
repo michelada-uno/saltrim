@@ -79,8 +79,33 @@ reap-session! which close-sse!s the stored generator. No heartbeat.
 - **Editor double-path**: the editor still gets its patches from the one-shot
   `@post` response; peers get them via the stream. Could unify (everything via
   streams, `/cell` returns empty) once reconnect is solid.
-- **Conflict policy**: last-write-wins, no locking/merge. Fine for now; revisit
-  if simultaneous edits to the same cell matter.
+- **Conflict policy**: last-write-wins for distinct cells. Same-cell editing is
+  now guarded by presence locks (below); cross-cell merge is still absent.
 
 The `/debug` endpoint (session/sheet counts) is dev-only — gate or remove before
 any real deployment.
+
+## Presence & edit locking — follow-ups
+
+DONE: collaborator cursors + edit locks + selection — all SERVER-RENDERED as
+overlays (#self for the current user, #peers for others), no per-cell client JS.
+Per-session :cursor/:editing; presence posted declaratively via Datastar
+(@post '/presence' in cell + formula-bar data-on handlers). Editing marker locks
+the cell (pointer-events + server-side locked-by-other? guard in /cell).
+Selection persists off-focus (box stays on :cursor); editing tier = animated
+marching-ants border.
+
+REMAINING:
+- **Stuck lock on crash mid-edit**: if a client sets :editing and then crashes
+  (no blur/commit, no beacon), the cell stays locked for that peer until the TTL
+  sweep (30 min) reaps the session. Mitigations to consider: a short per-edit
+  lock TTL (auto-expire :editing after N seconds of no refresh, with the client
+  re-asserting while focused), or clearing :editing on stream death.
+- **Selection latency**: the #self overlay moves on a server round-trip (presence
+  @post -> patch). Native input :focus masks it, but addrbox jumps show a small
+  lag. Fine; revisit only if it feels sluggish.
+- **Presence chattiness**: every focus/blur POSTs /presence and re-broadcasts the
+  whole #peers overlay to all sessions (and patches #self back). Fine at small
+  scale; debounce / diff if sessions-per-sheet grows.
+- **No name/identity**: peers are shown by color + "•"/"editing…" only (no user
+  name). Add when there's an identity/auth layer.

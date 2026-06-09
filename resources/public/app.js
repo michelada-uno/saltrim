@@ -31,6 +31,8 @@ function render() {
   // translate relative to the CONTENT base (cb,rb) -> always aligned to #cells
   const tx = m.cb * g.CW - SX, ty = m.rb * g.RH - SY;
   setT('cells', tx, ty);
+  setT('self', tx, ty);      // own selection/editing overlay tracks the cell layer
+  setT('peers', tx, ty);     // collaborator overlay tracks the cell layer
   setT('colstrip', tx, 0);
   setT('rowstrip', 0, ty);
   thumb('vbar', 'vthumb', SY, m.th, true);
@@ -105,9 +107,18 @@ function jump(addr) {
   let ci = 0; for (const ch of m[1]) ci = ci * 26 + (ch.charCodeAt(0) - 64); ci -= 1;
   const ri = parseInt(m[2], 10) - 1;
   SX = ci * g.CW; SY = ri * g.RH;          // no clamp: /view extends totals to cover
+  // selection + presence are server-rendered: $sel is already bound from the
+  // address box; nudge the server to move the #self overlay to it.
+  const pt = $('presencetrigger'); if (pt) pt.click();
   render(); requestView(true);
 }
 window.jump = jump;
+
+// Selection (#self) and collaborator (#peers) overlays are SERVER-RENDERED.
+// Cell focus/blur and the formula bar post presence declaratively via Datastar
+// (@post '/presence' in their data-on handlers); the server moves the overlays.
+// No client-side class toggling here — the only client concern is keeping the
+// overlay layers translated with #cells (handled in render()).
 
 function initScroll() {
   const v = $('viewport'); if (!v || v.__scrollInit) return;
