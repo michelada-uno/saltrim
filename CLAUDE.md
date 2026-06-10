@@ -8,7 +8,9 @@ Read `SPEC.md` for the technical architecture. This file = how to work here.
 
 - **Qdrant:** When available, use Qdrant MCP server (`mcp-server-qdrant`, 
   `qdrant-local`, etc...) for persistent vector memory. When using it, explicitly
-  use collection name `dev-calcloj`.
+  use collection name `dev-clorax` (migrated from `dev-calcloj` after the rename;
+  old collection kept as backup). If the MCP tools error, the Qdrant REST API on
+  `localhost:6333` works directly (scroll/upsert).
 
 ## Communication style
 
@@ -33,13 +35,15 @@ If the user types `/caveman`, invoke the `caveman` Skill.
 
 ## Workflow
 
-- **Commit only when the user asks.** End commit messages with:
+- **PR workflow**: commit/push/open PRs freely on feature branches — no need
+  to ask. Never commit directly to `main`; the user reviews and merges PRs.
+  End commit messages with:
   `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
 - One coherent change per commit; write a real body explaining *why*.
 - **Spike risky unknowns first** (there are `spike*.clj` files proving Spindel
   behavior). Don't build UI on unproven engine assumptions.
 - **Test after engine changes**: `clojure -X:test` (must stay green, currently
-  15 tests / 58 assertions). Add tests for new engine behavior.
+  23 tests / 90 assertions). Add tests for new engine behavior.
 - **Check `app.js` syntax** after editing: `node --check resources/public/app.js`.
 - Keep `TECHDEBT.md` current — append when you defer something, mark items DONE.
 
@@ -117,8 +121,11 @@ Gotchas learned the hard way:
 ## Status / roadmap
 
 Done: reactive engine, A1 addressing + ranges, formulas (incl. formula→formula),
-errors+toast, cycle detection, tests, persistence + multi-tenancy, sessions
-(beacon + TTL sweep), live collaboration (push streams + reconnect), logical
-scroll. Next candidates (user's call): **style/format as reactive properties**
-(persistence format is ready for it), keyboard navigation, conflict policy.
-See `TECHDEBT.md` for deferred items.
+errors+toast, cycle detection, tests, persistence, sessions (beacon + TTL
+sweep), live collaboration (push streams + reconnect), logical scroll, keyboard
+navigation, **auth + multi-tenancy** (OAuth GitHub/Google + dev login, per-user
+sheets `<uid>__<name>`, owner-only /share, named presence). Dev login is on by
+default when no `CLORAX_*_CLIENT_ID/SECRET` env vars are set. Next candidates
+(user's call): **style/format as reactive properties** (persistence format is
+ready for it), read-only share tier, conflict policy. See `TECHDEBT.md` for
+deferred items.

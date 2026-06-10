@@ -108,5 +108,34 @@ REMAINING:
 - **Presence chattiness**: every focus/blur POSTs /presence and re-broadcasts the
   whole #peers overlay to all sessions (and patches #self back). Fine at small
   scale; debounce / diff if sessions-per-sheet grows.
-- **No name/identity**: peers are shown by color + "•"/"editing…" only (no user
-  name). Add when there's an identity/auth layer.
+- **No name/identity**: DONE — sessions carry :uid/:uname from the auth layer;
+  peer markers show the real user name ("Bob editing…").
+
+## Auth & multi-tenancy — follow-ups
+
+DONE: OAuth login (GitHub/Google via env config, hand-rolled code flow on
+http-kit's client), name-only dev provider (auto-on when no real provider is
+configured), HttpOnly token cookies with persistent users/tokens registries,
+per-owner sheet namespacing (`<uid>__<name>`, fmt 2 ownership envelope),
+owner-only /share toggle (+ share link), access checks on every endpoint,
+logout reaps the user's live sessions, /debug gated behind the dev provider.
+
+REMAINING:
+- **Tokens are stored in plaintext** (`data/tokens.edn`). Hash them (the cookie
+  carries the secret; the server only needs to verify) before any real deploy.
+- **No read-only tier**: a public sheet is editable by any signed-in user.
+  Sharing levels (view/edit) need a richer ACL than the single :public flag —
+  the fmt-2 envelope leaves room.
+- **Unsharing doesn't evict** collaborators already on the sheet: their
+  sessions stay until they leave (writes keep working). Check access per
+  /cell against the live record, or reap foreign sessions on unshare.
+- **Real-provider flows untested live**: GitHub/Google were implemented to
+  spec but only exercised with the provider unconfigured (redirect + error
+  paths). Needs one manual run with real client ids.
+- **Legacy un-namespaced sheets** (`data/default.edn` etc.) are no longer
+  served — only `owner__name` ids resolve. Claim by renaming the file to
+  `<uid>__<name>.edn` (loads as fmt 1 = public, next save upgrades to fmt 2).
+- **No sheet picker**: `store/list-names` exists but the UI is still the
+  name box (Enter opens). A dropdown of your sheets would help.
+- **OAuth state + auth sessions are single-node** (in-memory nonces, atom
+  registries). Fine for the current single-JVM deploy.
