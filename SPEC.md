@@ -101,7 +101,8 @@ await chain).
 
 - Persist the **source document**, not the Spindel graph: `{addr {:value raw}}`,
   a per-cell **property map** (room for `:style`/`:format` later, each a reactive
-  property compiled from its own source). EDN at `data/<id>.edn`.
+  property compiled from its own source). EDN at `<dir>/<id>.edn`, where `dir`
+  is `CLORAX_DATA_DIR` (default `data/`).
 - **fmt 2** wraps it in an ownership envelope:
   `{:fmt 2 :owner uid :public bool :cells …}`. fmt 1 files (pre-auth) load as
   owner nil + public true (legacy sheets stay readable). `load-record` returns

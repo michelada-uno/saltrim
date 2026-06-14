@@ -12,12 +12,12 @@
    We keep history (`:keep-history? true`) deliberately — `as-of` underpins the
    planned audit/branching features. Tokens are stored as a SHA-256 hash of the
    cookie secret (the cookie carries the secret; the DB never sees it)."
-  (:require [clojure.string :as str]
-            [datahike.api :as d]
+  (:require [datahike.api :as d]
             [konserve-jdbc.core]                      ; registers the konserve :jdbc store
-            [konserve.store :refer [validate-store-config]]))
+            [konserve.store :refer [validate-store-config]]
+            [uno.michelada.clorax.util :as util]))
 
-(defn- env [k] (let [v (System/getenv k)] (when-not (str/blank? v) v)))
+(defn- env [k] (util/env k))
 (defn- now [] (System/currentTimeMillis))
 
 ;; --- schema ---------------------------------------------------------------

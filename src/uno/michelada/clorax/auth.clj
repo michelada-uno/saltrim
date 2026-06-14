@@ -17,17 +17,14 @@
   (:require [clojure.string :as str]
             [org.httpkit.client :as hc]
             [jsonista.core :as json]
-            [uno.michelada.clorax.db :as db])
+            [uno.michelada.clorax.db :as db]
+            [uno.michelada.clorax.util :as util])
   (:import [java.security SecureRandom MessageDigest]))
 
 ;; --- config ---------------------------------------------------------------
 
-(defn- env [k]
-  (let [v (System/getenv k)]
-    (when-not (str/blank? v) v)))
-
 (defn base-url []
-  (or (env "CLORAX_BASE_URL") "http://localhost:8080"))
+  (or (util/env "CLORAX_BASE_URL") "http://localhost:8080"))
 
 (def ^:private provider-defs
   {:github {:label      "GitHub"
@@ -60,8 +57,8 @@
   []
   (into {}
         (keep (fn [[k {:keys [id-env secret-env] :as p}]]
-                (when-let [id (env id-env)]
-                  (when-let [secret (env secret-env)]
+                (when-let [id (util/env id-env)]
+                  (when-let [secret (util/env secret-env)]
                     [k (assoc p :client-id id :client-secret secret)]))))
         provider-defs))
 
@@ -69,7 +66,7 @@
   "Name-only dev login. Defaults to ON when no real provider is configured;
    CLORAX_DEV_AUTH=1/0 (or true/false) overrides either way."
   []
-  (let [v (env "CLORAX_DEV_AUTH")]
+  (let [v (util/env "CLORAX_DEV_AUTH")]
     (cond
       (contains? #{"1" "true" "yes"} v) true
       (contains? #{"0" "false" "no"} v) false

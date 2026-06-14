@@ -67,8 +67,8 @@ not files. Dev/staging defaults to an H2 file at `data/clorax-h2`; prod sets
 `CLORAX_DB_ID` (stable store UUID). JDBC is konserve-jdbc directly (forked for
 YugabyteDB — see `deps.edn`); **datahike-jdbc is NOT used** (datahike 0.8
 connects konserve stores generically). Sheet CELL data still lives in
-`data/<id>.edn`. **Spindel stays pinned at 0.1.15** — 0.1.23 breaks structural
-rebuild (see TECHDEBT.md).
+`<CLORAX_DATA_DIR>/<id>.edn` (env, default `data/`). **Spindel stays pinned at
+0.1.15** — 0.1.23 breaks structural rebuild (see TECHDEBT.md).
 
 Namespaces are rooted at `uno.michelada.clorax.*` under
 `src/uno/michelada/clorax/`. Coordinate `uno.michelada/clorax`; repo lives in

@@ -12,9 +12,10 @@
   (:require [clojure.java.io :as io]
             [clojure.edn :as edn]
             [clojure.string :as str]
-            [uno.michelada.clorax.sheet :as sheet]))
+            [uno.michelada.clorax.sheet :as sheet]
+            [uno.michelada.clorax.util :as util]))
 
-(def ^:private dir "data")
+(def ^:private dir (or (util/env "CLORAX_DATA_DIR") "data"))
 (def ^:private fmt 2)
 
 (defn valid-id?
