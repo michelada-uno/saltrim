@@ -42,3 +42,42 @@
 
 (deftest load-missing-nil
   (is (nil? (store/load-sheet "no_such_sheet_xyz"))))
+
+(deftest names-and-storage-ids
+  (testing "sheet names exclude underscores (owner__name separator)"
+    (is (store/valid-name? "budget-2026"))
+    (is (not (store/valid-name? "a_b")))
+    (is (not (store/valid-name? ""))))
+  (testing "storage-id composes only from safe parts"
+    (is (= "dev-alice__budget" (store/storage-id "dev-alice" "budget")))
+    (is (nil? (store/storage-id "Bad_Owner" "budget")))
+    (is (nil? (store/storage-id "dev-alice" "a_b"))))
+  (testing "split-id inverts storage-id; legacy plain ids have no owner"
+    (is (= ["dev-alice" "budget"] (store/split-id "dev-alice__budget")))
+    (is (= [nil "default"] (store/split-id "default")))))
+
+(def ^:private owned-id "dev-alice__t-owned")
+
+(deftest ownership-roundtrip
+  (io/delete-file (io/file "data" (str owned-id ".edn")) true)
+  (try
+    (let [s (sheet/create-sheet)]
+      (sheet/set-cell! s "A1" "7")
+      (sheet/settle! s)
+      (store/save! owned-id s {:owner "dev-alice" :public true}))
+    (let [{:keys [sh owner public]} (store/load-record owned-id)]
+      (is (= "dev-alice" owner))
+      (is (true? public))
+      (is (= 7 (sheet/value sh "A1"))))
+    (finally (io/delete-file (io/file "data" (str owned-id ".edn")) true))))
+
+(deftest legacy-fmt1-loads-public
+  ;; pre-auth files have no envelope: owner nil, public true (stay reachable)
+  (let [f (io/file "data" "t-legacy-fmt1.edn")]
+    (try
+      (spit f (pr-str {:fmt 1 :cells {"A1" {:value "5"}}}))
+      (let [{:keys [sh owner public]} (store/load-record "t-legacy-fmt1")]
+        (is (nil? owner))
+        (is (true? public))
+        (is (= 5 (sheet/value sh "A1"))))
+      (finally (io/delete-file f true)))))

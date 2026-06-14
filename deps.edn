@@ -2,12 +2,32 @@
 
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
 
-        ;; Reactive core. Clojars release (was a git sha pin; 0.1.15 is one
-        ;; commit ahead of that pin — a retention/leak fix, no API change).
+        ;; Reactive core. Pinned at 0.1.15: 0.1.23 changes spin-cancellation
+        ;; semantics and breaks our structural-rebuild path (cells resolve to
+        ;; {:error "Spin cancelled by user"} on recompute). Bumping it needs its
+        ;; own investigation — see TECHDEBT.md.
         org.replikativ/spindel {:mvn/version "0.1.15"}
 
         ;; SCI for sandboxed runtime formula eval (Step 4).
         org.babashka/sci {:mvn/version "0.8.43"}
+
+        ;; Datahike: identity + metadata store (users, auth tokens, and later
+        ;; sheet metadata + shares). Sheet CELL data stays in the file store.
+        ;; datahike 0.8 connects konserve stores generically — the :jdbc backend
+        ;; is provided by konserve-jdbc directly (no datahike-jdbc wrapper).
+        ;; konserve-jdbc + next.jdbc are FORKS carrying YugabyteDB support
+        ;; (proven set from another michelada project). Backends: H2 dev/staging,
+        ;; YugabyteDB prod (com.yugabyte driver), :memory for tests.
+        org.replikativ/datahike {:mvn/version "0.8.1676"}
+        org.replikativ/konserve-jdbc
+        {:git/url "https://github.com/aldebogdanov/konserve-jdbc.git"
+         :git/sha "ca21bfbbf07c0167dc0561e6bb3f2615fdbc2ea2"
+         :exclusions [com.github.seancorfield/next.jdbc]}
+        com.github.seancorfield/next.jdbc
+        {:git/url "https://github.com/aldebogdanov/next-jdbc.git"
+         :git/sha "f95d3ba621ebb64656d79db3c79c696f76a34dcb"}
+        com.h2database/h2 {:mvn/version "2.4.240"}
+        com.yugabyte/jdbc-yugabytedb {:mvn/version "42.7.3-yb-4"}
 
         ;; Web stack — Datastar driven from JVM (no spindel /dom, that is cljs).
         http-kit/http-kit {:mvn/version "2.8.0"}

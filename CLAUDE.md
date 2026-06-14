@@ -8,7 +8,9 @@ Read `SPEC.md` for the technical architecture. This file = how to work here.
 
 - **Qdrant:** When available, use Qdrant MCP server (`mcp-server-qdrant`, 
   `qdrant-local`, etc...) for persistent vector memory. When using it, explicitly
-  use collection name `dev-calcloj`.
+  use collection name `dev-clorax` (migrated from `dev-calcloj` after the rename;
+  old collection kept as backup). If the MCP tools error, the Qdrant REST API on
+  `localhost:6333` works directly (scroll/upsert).
 
 ## Communication style
 
@@ -33,13 +35,16 @@ If the user types `/caveman`, invoke the `caveman` Skill.
 
 ## Workflow
 
-- **Commit only when the user asks.** End commit messages with:
+- **PR workflow**: commit/push/open PRs freely on feature branches — no need
+  to ask. Never commit directly to `main`; the user reviews and merges PRs.
+  End commit messages with:
   `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
 - One coherent change per commit; write a real body explaining *why*.
 - **Spike risky unknowns first** (there are `spike*.clj` files proving Spindel
   behavior). Don't build UI on unproven engine assumptions.
 - **Test after engine changes**: `clojure -X:test` (must stay green, currently
-  15 tests / 58 assertions). Add tests for new engine behavior.
+  26 tests / 101 assertions; `db`/`auth` suites use the `:memory` Datahike
+  backend). Add tests for new engine behavior.
 - **Check `app.js` syntax** after editing: `node --check resources/public/app.js`.
 - Keep `TECHDEBT.md` current — append when you defer something, mark items DONE.
 
@@ -54,6 +59,16 @@ node --check resources/public/app.js
 clojure -T:build uber             # runnable uberjar -> target/clorax-<v>.jar
 java -jar target/clorax-<v>.jar  # run the built artifact (serves :8080)
 ```
+
+**Identity store (Datahike).** Users + auth tokens live in Datahike (`db` ns),
+not files. Dev/staging defaults to an H2 file at `data/clorax-h2`; prod sets
+`CLORAX_DB_JDBC_URL` (YugabyteDB); tests use `:memory`. Env: `CLORAX_DB_BACKEND`
+(`mem`), `CLORAX_DB_JDBC_URL`, `CLORAX_DB_TABLE`, `CLORAX_DB_PATH` (H2 file),
+`CLORAX_DB_ID` (stable store UUID). JDBC is konserve-jdbc directly (forked for
+YugabyteDB — see `deps.edn`); **datahike-jdbc is NOT used** (datahike 0.8
+connects konserve stores generically). Sheet CELL data still lives in
+`<CLORAX_DATA_DIR>/<id>.edn` (env, default `data/`). **Spindel stays pinned at
+0.1.15** — 0.1.23 breaks structural rebuild (see TECHDEBT.md).
 
 Namespaces are rooted at `uno.michelada.clorax.*` under
 `src/uno/michelada/clorax/`. Coordinate `uno.michelada/clorax`; repo lives in
@@ -117,8 +132,11 @@ Gotchas learned the hard way:
 ## Status / roadmap
 
 Done: reactive engine, A1 addressing + ranges, formulas (incl. formula→formula),
-errors+toast, cycle detection, tests, persistence + multi-tenancy, sessions
-(beacon + TTL sweep), live collaboration (push streams + reconnect), logical
-scroll. Next candidates (user's call): **style/format as reactive properties**
-(persistence format is ready for it), keyboard navigation, conflict policy.
-See `TECHDEBT.md` for deferred items.
+errors+toast, cycle detection, tests, persistence, sessions (beacon + TTL
+sweep), live collaboration (push streams + reconnect), logical scroll, keyboard
+navigation, **auth + multi-tenancy** (OAuth GitHub/Google + dev login, per-user
+sheets `<uid>__<name>`, owner-only /share, named presence). Dev login is on by
+default when no `CLORAX_*_CLIENT_ID/SECRET` env vars are set. Next candidates
+(user's call): **style/format as reactive properties** (persistence format is
+ready for it), read-only share tier, conflict policy. See `TECHDEBT.md` for
+deferred items.

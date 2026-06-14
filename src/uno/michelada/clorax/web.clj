@@ -17,6 +17,7 @@
             [hiccup2.core :as h]
             [jsonista.core :as json]
             [uno.michelada.clorax.addr :as addr]
+            [uno.michelada.clorax.auth :as auth]
             [uno.michelada.clorax.sheet :as sheet]
             [uno.michelada.clorax.store :as store]
             [starfederation.datastar.clojure.api :as d*]
@@ -62,13 +63,38 @@
 
 ;; --- state --------------------------------------------------------------
 
-(defonce ^:private sheets* (atom {}))   ; id -> sheet (lazy: load from disk / create)
-(defn- sheet-for [id]
-  (let [id (if (store/valid-id? id) id "default")]
-    (or (@sheets* id)
-        (let [s (or (store/load-sheet id) (sheet/create-sheet))]
-          (swap! sheets* assoc id s)
-          s))))
+;; storage-id -> {:sh sheet :owner uid|nil :public bool} (lazy: load / create)
+(defonce ^:private sheets* (atom {}))
+
+(defn- sheet-rec
+  "The loaded record for a storage id; loads from disk lazily, else creates a
+   fresh private sheet owned by `owner`."
+  [id owner]
+  (or (@sheets* id)
+      (let [rec (or (store/load-record id)
+                    {:sh (sheet/create-sheet) :owner owner :public false})]
+        (swap! sheets* assoc id rec)
+        rec)))
+
+(defn- save-rec!
+  "Persist a loaded sheet together with its ownership meta."
+  [id]
+  (when-let [{:keys [sh owner public]} (@sheets* id)]
+    (store/save! id sh {:owner owner :public public})))
+
+(defn- accessible-rec
+  "The record for storage id IF `uid` may access it: owners reach (and auto-
+   create) their own sheets; anyone signed-in reaches a foreign sheet that
+   exists and is :public. Nil = denied/invalid."
+  [uid id]
+  (when (and uid (store/valid-id? id))
+    (let [[owner _] (store/split-id id)]
+      (cond
+        (nil? owner)  nil                       ; legacy un-namespaced ids: not served
+        (= owner uid) (sheet-rec id uid)
+        :else (when-let [rec (or (@sheets* id)
+                                 (when (store/exists? id) (sheet-rec id owner)))]
+                (when (:public rec) rec))))))
 
 ;; Sessions: one per client. Hold the sheet id + per-session viewport (view/dims)
 ;; so concurrent clients on the same sheet keep independent scroll. Each carries
@@ -111,25 +137,32 @@
   "Save then release a sheet whose last session just left."
   [sheet-id]
   (when (and (zero? (sessions-on sheet-id)) (@sheets* sheet-id))
-    (let [sh (@sheets* sheet-id)]
-      (store/save! sheet-id sh)
+    (let [{:keys [sh]} (@sheets* sheet-id)]
+      (save-rec! sheet-id)
       (sheet/close! sh)
       (swap! sheets* dissoc sheet-id))))
 
-(defn- register-session! [sid sheet-id]
-  (sheet-for sheet-id)                    ; acquire (load) the sheet
+(defn- register-session! [sid sheet-id uid]
+  (let [[owner _] (store/split-id sheet-id)]
+    (sheet-rec sheet-id (or owner uid)))  ; acquire (load) the sheet
   (swap! sessions* assoc sid {:sheet sheet-id :view {:r0 0 :c0 0}
                               :dims nil :last-seen (now)
+                              :uid uid
+                              :uname (or (:name (auth/user-info uid)) uid)
                               :color (color-for sid) :cursor nil :editing nil}))
 
 (defn- touch! [sid] (when (@sessions* sid) (swap! sessions* assoc-in [sid :last-seen] (now))))
 
 (defn- ensure-session!
   "Lazily (re)register a session for an active request, then stamp it alive. A
-   client whose session was swept (crash/sleep TTL) transparently comes back."
-  [sid sheet-id]
+   client whose session was swept (crash/sleep TTL) transparently comes back.
+   A sid registered under a DIFFERENT user is re-registered for the current
+   one (a sid is client-generated — never trust it to carry identity)."
+  [sid sheet-id uid]
   (when (and sid (re-matches sid-re (str sid)))
-    (when-not (@sessions* sid) (register-session! sid sheet-id))
+    (let [s (@sessions* sid)]
+      (when (or (nil? s) (not= uid (:uid s)))
+        (register-session! sid sheet-id uid)))
     (touch! sid)))
 
 (declare close-gen! broadcast-presence!)
@@ -303,7 +336,27 @@
                                             "background:#f0f0f0;z-index:5;") GUT BAR BAR)}
        [:div {:id "hthumb" :style "position:absolute;top:1px;bottom:1px;left:0;width:30px;background:#bbb;border-radius:6px;"}]]])))
 
-(defn- page [sh id]
+(declare share-html)
+
+(defn- sheet-picker
+  "Dropdown of the signed-in user's sheets for quick switching. Selecting one
+   navigates to it. When viewing a sheet you don't own, a leading disabled
+   option shows it (and the list still lets you jump back to one of yours)."
+  [uid storage-id sname]
+  (let [names     (store/list-names uid)
+        [owner _] (store/split-id storage-id)
+        own?      (= owner uid)
+        mine      (if own? (distinct (cons sname names)) names)]
+    [:select {:id "sheetpicker" :title "your sheets"
+              :data-on:change "el.value && (location.href='/?s='+el.value)"
+              :style (str "max-width:9rem;font:13px sans-serif;padding:5px 6px;"
+                          "border:1px solid #bbb;border-radius:4px;background:#f6f6f6;")}
+     (when-not own?
+       [:option {:value "" :selected true} (str "↗ " sname)])
+     (for [n mine]
+       [:option {:value n :selected (and own? (= n sname))} n])]))
+
+(defn- page [sh storage-id sname uid]
   (str
    "<!doctype html>"
    (h/html
@@ -317,7 +370,7 @@
                              (- CW 1) (- RH 1)))]
       [:script {:type "module" :src "/datastar.js"}]
       [:script {:src "/app.js"}]]
-     [:body {:data-signals (format "{cell:'', v:'', err:'', sel:'', bar:'', edit:false, r0:0, c0:0, sheet:'%s', sid:''}" id)
+     [:body {:data-signals (format "{cell:'', v:'', err:'', sel:'', bar:'', edit:false, r0:0, c0:0, sheet:'%s', sid:''}" storage-id)
              :style "font-family:sans-serif;margin:0;padding:.6rem;"}
       ;; hidden input carrying the session id into $sid, and a hidden trigger
       ;; /app.js clicks to open the persistent collaboration stream via Datastar
@@ -331,12 +384,13 @@
              :style (str "position:fixed;top:1rem;right:1rem;max-width:26rem;background:#c0392b;"
                          "color:#fff;padding:.6rem .9rem;border-radius:6px;font:13px sans-serif;"
                          "cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.3);z-index:20;")}]
-      ;; sheet switcher + address box (jump) + formula bar
+      ;; sheet picker + new-sheet box + address box (jump) + formula bar + sharing + identity
       [:div {:style "display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem;"}
-       [:input {:id "sheetbox" :value id :placeholder "sheet"
-                :data-on:keydown "evt.key==='Enter' && (location.href='/?s='+el.value)"
-                :title "sheet id — Enter to open"
-                :style (str "width:7rem;font:13px sans-serif;padding:5px 6px;"
+       (sheet-picker uid storage-id sname)
+       [:input {:id "sheetbox" :placeholder "new sheet…"
+                :data-on:keydown "evt.key==='Enter' && el.value && (location.href='/?s='+el.value)"
+                :title "type a name + Enter to create/open one of your sheets"
+                :style (str "width:6rem;font:13px sans-serif;padding:5px 6px;"
                             "border:1px solid #bbb;border-radius:4px;background:#f6f6f6;")}]
        [:input {:id "addrbox" :data-bind:sel "" :placeholder "A1"
                 :data-on:keydown "evt.key==='Enter' && jump($sel)"
@@ -349,7 +403,16 @@
                 :data-on:keydown "evt.key==='Enter' && ($cell=$sel, $v=$bar, @post('/cell'))"
                 :data-on:blur "$cell=$sel, $v=$bar, @post('/cell'), $edit=false, @post('/presence')"
                 :style (str "flex:1;font:13px monospace;padding:5px 8px;border:1px solid #bbb;"
-                            "border-radius:4px;")}]]
+                            "border-radius:4px;")}]
+       ;; sharing toggle / badge (patched back by POST /share)
+       (h/raw (share-html uid storage-id))
+       ;; who am I + sign out
+       [:span {:style "font:12px sans-serif;color:#444;white-space:nowrap;"}
+        (or (:name (auth/user-info uid)) uid)]
+       [:form {:method "post" :action "/logout" :style "margin:0;"}
+        [:button {:style (str "font:12px sans-serif;padding:5px 8px;border:1px solid #bbb;"
+                              "border-radius:4px;background:#f6f6f6;cursor:pointer;")}
+         "sign out"]]]
       ;; hidden r0/c0 carriers (/app.js sets these then clicks #viewtrigger so
       ;; Datastar @post /view and applies the returned window patch).
       [:input {:id "r0box" :data-bind:r0 "" :style "display:none;"}]
@@ -401,9 +464,6 @@
       (re-find #"locked by another" m) "cell is being edited by another collaborator"
       :else m)))
 
-(defn- sheet-id-of [{:keys [sheet]}]
-  (if (store/valid-id? sheet) sheet "default"))
-
 (defn- qparam [req k]
   (some->> (:query-string req)
            (re-find (re-pattern (str "(?:^|&)" k "=([^&]+)")))
@@ -437,10 +497,11 @@
 (defn- peer-marker
   "Overlay div for one peer's cursor, positioned window-relative to `view`. An
    editing peer's marker captures pointer events (locks the cell beneath)."
-  [view {:keys [cursor editing color]}]
+  [view {:keys [cursor editing color uname]}]
   (let [{:keys [ci ri]} (addr/parse cursor)
         [cb rb] (view-base view)
         editing? (= editing cursor)
+        tag (or uname "•")
         base (format (str "left:%dpx;top:%dpx;width:%dpx;height:%dpx;border-color:%s;")
                      (* (- ci cb) CW) (* (- ri rb) RH) (dec CW) (dec RH) color)]
     (str (h/html
@@ -450,7 +511,7 @@
                                ";pointer-events:auto;cursor:not-allowed;")
                           base)}
            [:span {:class "peertag" :style (str "background:" color)}
-            (if editing? "editing…" "•")]]))))
+            (if editing? (str tag " editing…") tag)]]))))
 
 (defn- peers-html
   "Overlay markers for every OTHER session whose cursor falls in viewer-sid's
@@ -496,14 +557,59 @@
                    (and (not= k sid) (= sheet-id (:sheet s)) (= (:editing s) cell)))
                  @sessions*)))
 
+(defn- deny
+  "One-shot SSE that only raises the error toast (auth/access failures)."
+  [req msg]
+  (sse req (fn [gen] (signals! gen {:err msg}))))
+
+;; --- request gates -------------------------------------------------------
+;; Resolve identity + authorization ONCE, then hand the handler what it needs
+;; (or short-circuit with a denial). These replace the gate boilerplate that
+;; otherwise repeats in every handler.
+
+(defn- with-access
+  "POST handlers: resolve the signed-in user and sheet access from the request
+   signals. On success open the one-shot SSE response and call
+   (f uid sheet-id rec sig gen); otherwise raise the access/auth error toast."
+  [req f]
+  (let [uid      (auth/req->uid req)
+        sig      (read-signals req)
+        sheet-id (:sheet sig)
+        rec      (accessible-rec uid sheet-id)]
+    (if-not rec
+      (deny req (if uid "no access to this sheet" "not signed in"))
+      (sse req (fn [gen] (f uid sheet-id rec sig gen))))))
+
+(defn- with-owner
+  "Like `with-access`, but requires the user to OWN the (already-loaded) sheet —
+   for owner-only actions such as sharing."
+  [req f]
+  (let [uid      (auth/req->uid req)
+        sig      (read-signals req)
+        sheet-id (:sheet sig)
+        rec      (when (store/valid-id? (str sheet-id)) (@sheets* sheet-id))]
+    (if-not (and uid rec (= uid (:owner rec)))
+      (deny req "only the owner can do this")
+      (sse req (fn [gen] (f uid sheet-id rec sig gen))))))
+
+(defn- with-stream-access
+  "The persistent /stream GET: identity + sheet come from query params (not
+   signals). On success call (f uid sid sheet-id) — which returns its OWN
+   long-lived SSE response; otherwise a plain 403."
+  [req f]
+  (let [uid      (auth/req->uid req)
+        sid      (qparam req "sid")
+        sheet-id (qparam req "s")]
+    (if-not (accessible-rec uid sheet-id)
+      {:status 403 :body "no access"}
+      (f uid sid sheet-id))))
+
 (defn- handle-cell [req]
-  (let [{:keys [cell v sid] :as sig} (read-signals req)
-        sheet-id (sheet-id-of sig)
-        sh   (sheet-for sheet-id)
-        _    (ensure-session! sid sheet-id)     ; lazy re-register + keep alive
-        view (session-view sid)]
-    (sse req
-      (fn [gen]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [cell v sid]} gen]
+      (ensure-session! sid sheet-id uid)        ; lazy re-register + keep alive
+      (let [sh   (:sh rec)
+            view (session-view sid)]
         (when (addr/valid? cell)
           (locking edit-lock
             (try
@@ -511,7 +617,7 @@
                 (throw (ex-info "locked by another collaborator" {:locked cell})))
               (sheet/set-cell! sh cell (str v))
               (sheet/settle! sh)
-              (store/save! sheet-id sh)               ; autosave (source document)
+              (save-rec! sheet-id)              ; autosave (source + meta)
               (let [affected (cons cell (sort (sheet/dependents* sh cell)))
                     visible  (filter #(in-window? view %) affected)   ; on-screen for THIS session
                     errs (keep (fn [a]
@@ -528,14 +634,12 @@
                 (signals! gen {:err (str cell ": " (pretty-err (.getMessage e)))})))))))))
 
 (defn- handle-view [req]
-  (let [{:keys [r0 c0 sid] :as sig} (read-signals req)
-        sheet-id (sheet-id-of sig)
-        sh   (sheet-for sheet-id)
-        view {:r0 (max 0 (long (or r0 0))) :c0 (max 0 (long (or c0 0)))}]
-    (ensure-session! sid sheet-id)            ; lazy re-register + keep alive
-    (set-session-view! sid view)
-    (sse req
-      (fn [gen]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [r0 c0 sid]} gen]
+      (ensure-session! sid sheet-id uid)        ; lazy re-register + keep alive
+      (let [sh   (:sh rec)
+            view {:r0 (max 0 (long (or r0 0))) :c0 (max 0 (long (or c0 0)))}]
+        (set-session-view! sid view)
         ;; logical scroll: always cheap inner patches. The window is positioned
         ;; relative to (c0,r0); /app.js translates + sizes the scrollbars from
         ;; #meta totals (no giant spacer to resize).
@@ -557,16 +661,16 @@
    cursor (:cursor) and editing cell (:editing), patches THIS session's own
    #self overlay back, and re-broadcasts #peers to everyone else on the sheet."
   [req]
-  (let [{:keys [sel edit sid] :as sig} (read-signals req)
-        sheet-id (sheet-id-of sig)]
-    (ensure-session! sid sheet-id)
-    (swap! sessions* update sid assoc
-           :cursor  (when (addr/valid? sel) sel)
-           :editing (when (and edit (addr/valid? sel)) sel))
-    ;; peers' #peers via their persistent streams; this session's #self via the
-    ;; one-shot @post response below (which is what we return).
-    (broadcast-presence! sheet-id)
-    (sse req (fn [gen] (patch-inner! gen "#self" (self-html sid sheet-id))))))
+  (with-access req
+    (fn [uid sheet-id _rec {:keys [sel edit sid]} gen]
+      (ensure-session! sid sheet-id uid)
+      (swap! sessions* update sid assoc
+             :cursor  (when (addr/valid? sel) sel)
+             :editing (when (and edit (addr/valid? sel)) sel))
+      ;; peers' #peers via their persistent streams; this session's #self via
+      ;; the one-shot @post response (the gen this gate opened).
+      (broadcast-presence! sheet-id)
+      (patch-inner! gen "#self" (self-html sid sheet-id)))))
 
 ;; Session lifecycle. The persistent /stream registers the session and stores
 ;; its push generator (server -> client collaboration channel). Cleanup never
@@ -579,38 +683,186 @@
   "Persistent per-session SSE. Registers the session and stores its generator so
    edits elsewhere can be pushed here. Stays open — never close-sse! on open."
   [req]
-  (let [sid      (qparam req "sid")
-        sheet-id (let [s (qparam req "s")] (if (store/valid-id? s) s "default"))]
-    (hk/->sse-response req
-      {hk/on-open
-       (fn [gen]
-         (when (and sid (re-matches sid-re sid))
-           ;; reconnect: keep the existing session's view/dims, just swap the
-           ;; (dead) generator for the new one. fresh connect: register.
-           (when-not (@sessions* sid) (register-session! sid sheet-id))
-           (swap! sessions* update sid assoc :gen gen)
-           (touch! sid)
-           ;; flush once so the client sees an established, open stream (an SSE
-           ;; that sends nothing looks "finished" -> client reconnect storm).
-           (try (d*/patch-signals! gen "{}") (catch Throwable _))
-           ;; restore this session's own marker (reconnect) and show it the
-           ;; cursors already present (and vice versa).
-           (try (patch-inner! gen "#self" (self-html sid sheet-id)) (catch Throwable _))
-           (broadcast-presence! sheet-id)))})))
+  (with-stream-access req
+    (fn [uid sid sheet-id]
+      (hk/->sse-response req
+        {hk/on-open
+         (fn [gen]
+           (when (and sid (re-matches sid-re sid))
+             ;; reconnect: keep the existing session's view/dims, just swap the
+             ;; (dead) generator for the new one. fresh connect: register.
+             (ensure-session! sid sheet-id uid)
+             (swap! sessions* update sid assoc :gen gen)
+             ;; flush once so the client sees an established, open stream (an SSE
+             ;; that sends nothing looks "finished" -> client reconnect storm).
+             (try (d*/patch-signals! gen "{}") (catch Throwable _))
+             ;; restore this session's own marker (reconnect) and show it the
+             ;; cursors already present (and vice versa).
+             (try (patch-inner! gen "#self" (self-html sid sheet-id)) (catch Throwable _))
+             (broadcast-presence! sheet-id)))}))))
 
 (defn- handle-session-end [req]
-  (let [{:keys [sid]} (body-json req)]
-    (when sid (reap-session! sid))
+  (let [uid (auth/req->uid req)
+        {:keys [sid]} (body-json req)]
+    ;; only the session's own user may end it (sids are client-generated)
+    (when (and sid uid (= uid (get-in @sessions* [sid :uid])))
+      (reap-session! sid))
     {:status 204}))
 
+;; --- sharing -------------------------------------------------------------
+
+(defn- share-html
+  "The #sharebar toolbar fragment. The owner gets the public/private toggle
+   (plus the share link when public); a visiting collaborator sees a badge."
+  [uid sheet-id]
+  (let [{:keys [owner public]} (@sheets* sheet-id)
+        [_ sname] (store/split-id sheet-id)
+        url (str (auth/base-url) "/?u=" owner "&s=" sname)
+        btn-style (str "font:12px sans-serif;padding:5px 8px;border:1px solid #bbb;"
+                       "border-radius:4px;background:#f6f6f6;cursor:pointer;")]
+    (str (h/html
+          [:div {:id "sharebar" :style "display:flex;align-items:center;gap:.4rem;"}
+           (if (= uid owner)
+             [:button {:data-on:click "@post('/share')" :title "toggle sharing"
+                       :style btn-style}
+              (if public "🌐 shared" "🔒 private")]
+             [:span {:style "font:12px sans-serif;color:#666;"}
+              (str "🌐 shared by " (or (:name (auth/user-info owner)) owner))])
+           (when (and (= uid owner) public)
+             [:input {:readonly true :value url :title "share link"
+                      :style (str "width:18rem;font:12px monospace;padding:4px 6px;"
+                                  "border:1px solid #ddd;border-radius:4px;color:#555;")}])]))))
+
+(defn- evict-foreign!
+  "Reap every session on `sheet-id` whose user is not `owner-uid`. Called when a
+   sheet is unshared so collaborators lose their live stream immediately; their
+   next /cell, /view or /stream reconnect then fails the access check."
+  [sheet-id owner-uid]
+  (doseq [[sid s] @sessions*]
+    (when (and (= sheet-id (:sheet s)) (not= owner-uid (:uid s)))
+      (reap-session! sid))))
+
+(defn- handle-share
+  "Owner-only toggle of a sheet's :public flag; patches #sharebar back. On
+   UNSHARE, evicts collaborators already on the sheet (their access is gone)."
+  [req]
+  (with-owner req
+    (fn [uid sheet-id _rec {:keys [sid]} gen]
+      (ensure-session! sid sheet-id uid)
+      (let [public? (get-in (swap! sheets* update-in [sheet-id :public] not)
+                            [sheet-id :public])]
+        (save-rec! sheet-id)
+        (when-not public?            ; just went public -> private
+          (evict-foreign! sheet-id uid))
+        (d*/patch-elements! gen (share-html uid sheet-id))))))
+
+;; --- auth routes (login page, OAuth redirects, logout) -------------------
+
+(defn- url-encode [s] (java.net.URLEncoder/encode (str s) "UTF-8"))
+(defn- url-decode [s] (java.net.URLDecoder/decode (str s) "UTF-8"))
+
+(defn- redirect [loc & [set-cookie]]
+  (cond-> {:status 303 :headers {"Location" loc}}
+    set-cookie (assoc-in [:headers "Set-Cookie"] set-cookie)))
+
+(defn- login-page [err]
+  (let [field (str "font:13px sans-serif;padding:6px 8px;border:1px solid #bbb;"
+                   "border-radius:4px;")]
+    (str
+     "<!doctype html>"
+     (h/html
+      [:html
+       [:head [:meta {:charset "utf-8"}] [:title "Clorax — sign in"]]
+       [:body {:style "font-family:sans-serif;max-width:24rem;margin:14vh auto;"}
+        [:h1 {:style "font-weight:600;"} "Clorax"]
+        [:p {:style "color:#666;"} "Sign in to open your sheets."]
+        (when err
+          [:p {:style "color:#c0392b;font:13px sans-serif;"} (url-decode err)])
+        [:div {:style "display:flex;flex-direction:column;gap:.6rem;"}
+         (for [[k p] (auth/providers)]
+           [:a {:href (str "/auth/" (name k))
+                :style (str field "text-align:center;text-decoration:none;"
+                            "background:#f6f6f6;color:#222;display:block;")}
+            (str "Continue with " (:label p))])
+         (when (auth/dev-auth?)
+           [:form {:method "get" :action "/auth/dev"
+                   :style "display:flex;gap:.4rem;"}
+            [:input {:name "name" :placeholder "your name (dev login)"
+                     :autofocus true :style (str field "flex:1;")}]
+            [:button {:style field} "Sign in"]])]]]))))
+
+(defn- denied-page [uid]
+  (str
+   "<!doctype html>"
+   (h/html
+    [:html
+     [:head [:meta {:charset "utf-8"}] [:title "Clorax — no access"]]
+     [:body {:style "font-family:sans-serif;max-width:24rem;margin:14vh auto;"}
+      [:h1 {:style "font-weight:600;"} "No access"]
+      [:p {:style "color:#666;"}
+       "This sheet doesn't exist or isn't shared with you."]
+      [:p [:a {:href "/"} "Back to your sheets"]]]])))
+
+(defn- auth-routes
+  "Identity endpoints; nil when the request is not one of them."
+  [req]
+  (let [{:keys [request-method uri]} req]
+    (cond
+      (and (= :get request-method) (= uri "/login"))
+      (if (auth/req->uid req)
+        (redirect "/")
+        {:status 200 :headers {"Content-Type" "text/html"}
+         :body (login-page (qparam req "err"))})
+
+      (and (= :post request-method) (= uri "/logout"))
+      (let [uid (auth/req->uid req)]
+        (auth/revoke-token! (auth/req->token req))
+        ;; reap the user's live sessions so their presence markers and edit
+        ;; locks don't linger until the TTL sweep
+        (doseq [[sid s] @sessions* :when (and uid (= uid (:uid s)))]
+          (reap-session! sid))
+        (redirect "/login" (auth/clear-cookie)))
+
+      (and (= :get request-method) (= uri "/auth/dev"))
+      (let [{:keys [token error]} (auth/dev-login! (some-> (qparam req "name") url-decode))]
+        (if token
+          (redirect "/" (auth/auth-cookie token))
+          (redirect (str "/login?err=" (url-encode (or error "login failed"))))))
+
+      (and (= :get request-method) (re-matches #"/auth/(github|google)" uri))
+      (let [[_ p] (re-matches #"/auth/(github|google)" uri)]
+        (if-let [u (auth/login-url (keyword p))]
+          (redirect u)
+          (redirect (str "/login?err=" (url-encode (str p " login is not configured"))))))
+
+      (and (= :get request-method) (re-matches #"/auth/(github|google)/callback" uri))
+      (let [[_ p] (re-matches #"/auth/(github|google)/callback" uri)
+            {:keys [token error]} (auth/callback! (keyword p)
+                                                  (some-> (qparam req "code") url-decode)
+                                                  (qparam req "state"))]
+        (if token
+          (redirect "/" (auth/auth-cookie token))
+          (redirect (str "/login?err=" (url-encode (or error "login failed")))))))))
+
+(defn- handle-root [req]
+  (let [uid (auth/req->uid req)]
+    (if-not uid
+      (redirect "/login")
+      (let [sname (let [s (qparam req "s")] (if (store/valid-name? s) s "default"))
+            owner (let [o (qparam req "u")] (when (and o (re-matches auth/uid-re o)) o))
+            id    (store/storage-id (or owner uid) sname)
+            rec   (when id (accessible-rec uid id))]
+        (if rec
+          {:status 200 :headers {"Content-Type" "text/html"}
+           :body (page (:sh rec) id sname uid)}
+          {:status 403 :headers {"Content-Type" "text/html"}
+           :body (denied-page uid)})))))
+
 (defn- app [req]
-  (case [(:request-method req) (:uri req)]
-    [:get "/"]            (let [sheet-id (or (some->> (:query-string req)
-                                                      (re-find #"(?:^|&)s=([A-Za-z0-9_-]{1,64})")
-                                                      second)
-                                             "default")]
-                            {:status 200 :headers {"Content-Type" "text/html"}
-                             :body (page (sheet-for sheet-id) sheet-id)})
+  (or
+   (auth-routes req)
+   (case [(:request-method req) (:uri req)]
+    [:get "/"]            (handle-root req)
     [:get "/datastar.js"] (if-let [r (io/resource "public/datastar.js")]
                             {:status 200 :headers {"Content-Type" "text/javascript"}
                              :body (slurp r)}
@@ -621,20 +873,25 @@
                             {:status 404 :body "no app.js"})
     [:get "/stream"]         (handle-stream req)
     [:post "/session/end"]   (handle-session-end req)
-    [:get "/debug"]       {:status 200 :headers {"Content-Type" "application/json"}
-                           :body (json/write-value-as-string
-                                  {:sessions (count @sessions*)
-                                   :loaded-sheets (vec (keys @sheets*))
-                                   :detail (mapv (fn [[sid s]]
-                                                   {:sid (subs sid 0 (min 6 (count sid)))
-                                                    :sheet (:sheet s)
-                                                    :gen? (boolean (:gen s))
-                                                    :view (:view s)})
-                                                 @sessions*)})}
+    ;; dev-only diagnostics: exposed only under the name-only dev provider
+    [:get "/debug"]       (if-not (auth/dev-auth?)
+                            {:status 404 :body "not found"}
+                            {:status 200 :headers {"Content-Type" "application/json"}
+                             :body (json/write-value-as-string
+                                    {:sessions (count @sessions*)
+                                     :loaded-sheets (vec (keys @sheets*))
+                                     :detail (mapv (fn [[sid s]]
+                                                     {:sid (subs sid 0 (min 6 (count sid)))
+                                                      :sheet (:sheet s)
+                                                      :uid (:uid s)
+                                                      :gen? (boolean (:gen s))
+                                                      :view (:view s)})
+                                                   @sessions*)})})
     [:post "/cell"]       (handle-cell req)
     [:post "/view"]       (handle-view req)
     [:post "/presence"]   (handle-presence req)
-    {:status 404 :body "not found"}))
+    [:post "/share"]      (handle-share req)
+    {:status 404 :body "not found"})))
 
 (defonce ^:private server* (atom nil))
 
@@ -642,6 +899,10 @@
   (when @server* (@server*))
   (start-sweeper!)                          ; reap idle/orphan sessions
   (reset! server* (http/run-server #'app {:port (or port 8080)}))
-  (println "Clorax on http://localhost:" (or port 8080)))
+  (println "Clorax on http://localhost:" (or port 8080))
+  (println "auth:" (if-let [ps (seq (keys (auth/providers)))]
+                     (str/join ", " (map name ps))
+                     "none configured")
+           (if (auth/dev-auth?) "(+ dev login)" "")))
 
 (defn -main [& _] (start!) @(promise))

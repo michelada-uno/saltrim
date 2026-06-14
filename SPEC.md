@@ -21,6 +21,8 @@ on load. Multiple clients edit one sheet live.
 | ns | role |
 |----|------|
 | `addr` | A1 addressing. `col<->idx`, `parse`, `make`, `range-cells`, `valid?`. Address = letters+digits (`AAB1234`); **no colon** (colon = range separator, `A1:C3`). 0-based `ci/ri` internally. |
+| `auth` | Identity: OAuth 2.0 code flow (GitHub/Google, providers are data), name-only dev login, auth-token cookies; orchestrates hashing + the user/token registry in `db`. |
+| `db` | Datahike-backed registry (users, auth tokens; sheets+shares next). Backends: H2 dev/staging, YugabyteDB prod (konserve-jdbc fork), `:memory` for tests. |
 | `runtime` | Referenced by compiled formula bodies. `lookup`/`lookup-val` resolve a cell against the **current execution context's metadata** (works on executor threads). |
 | `formula` | Parse + compile formulas to Spins. |
 | `sheet` | Cell registry over one Spindel execution context. The engine API. |
@@ -99,11 +101,62 @@ await chain).
 
 - Persist the **source document**, not the Spindel graph: `{addr {:value raw}}`,
   a per-cell **property map** (room for `:style`/`:format` later, each a reactive
-  property compiled from its own source). EDN at `data/<id>.edn`.
+  property compiled from its own source). EDN at `<dir>/<id>.edn`, where `dir`
+  is `CLORAX_DATA_DIR` (default `data/`).
+- **fmt 2** wraps it in an ownership envelope:
+  `{:fmt 2 :owner uid :public bool :cells …}`. fmt 1 files (pre-auth) load as
+  owner nil + public true (legacy sheets stay readable). `load-record` returns
+  `{:sh :owner :public}`; `load-sheet` just the engine.
+- **Storage ids are namespaced per owner**: `<owner-uid>__<name>`. Owner uids
+  are `[a-z0-9-]` only (no underscores) and names `[A-Za-z0-9-]` (no
+  underscores), so `split-id` is unambiguous on the first `__`.
 - `load-sheet` rebuilds the reactive graph by replaying `set-cell!` (order-
   independent — formula refs resolve at run time). A reloaded sheet is fully live.
-- `valid-id?` guards path traversal. Behind `save!`/`load-sheet` so the backend
+- `valid-id?` guards path traversal. Behind `save!`/`load-record` so the backend
   can become Datahike/SQL later.
+
+## Identity & multi-tenancy (`auth` + `web`)
+
+- **Login**: OAuth 2.0 authorization-code flow, hand-rolled over http-kit's
+  client (`/auth/github`, `/auth/google` + `/callback`s; CSRF `state` nonces
+  with a 10-min TTL). A provider activates when `CLORAX_<PROVIDER>_CLIENT_ID`/
+  `_CLIENT_SECRET` env vars are set; `CLORAX_BASE_URL` builds redirect URIs.
+  When **no** real provider is configured the **dev provider** (name-only form
+  on `/login`, `GET /auth/dev?name=`) is on by default — `CLORAX_DEV_AUTH=1/0`
+  forces it either way.
+- **Auth sessions**: 32-byte random token in an `HttpOnly; SameSite=Lax`
+  cookie (`clorax_auth`, 30 d; `Secure` when base-url is https). The cookie
+  carries the secret; the DB stores only its **SHA-256 hash** (`db`, Datahike)
+  — users and tokens survive restarts. `POST /logout` revokes the token **and
+  reaps the user's live sessions** (presence markers / edit locks don't linger).
+- **Datahike store** (`db`): users + auth tokens (sheet metadata + shares move
+  here next; sheet CELL data stays in the file store). Backend is env-driven:
+  H2 file (`data/clorax-h2`) for dev/staging, a full JDBC url
+  (`CLORAX_DB_JDBC_URL`) for YugabyteDB in prod, `:memory` for tests
+  (`CLORAX_DB_BACKEND=mem`). `:keep-history? true` (as-of underpins the planned
+  audit/branching features). JDBC support is konserve-jdbc directly (forked for
+  YugabyteDB) — datahike 0.8 connects konserve stores generically, no
+  datahike-jdbc wrapper. konserve caches one c3p0 pool per spec and closes it
+  async on `create-database`'s release, so first-run creation pauses ~300 ms
+  before `connect` (same spec → same pool) to avoid using a closed pool.
+- **User ids**: `<prefix>-<ext-id>` sanitized to `[a-z0-9-]` (`gh-…`, `gg-…`,
+  `dev-…`), max 24 chars — no underscores by construction (see storage ids).
+- **Tenancy**: every request resolves through `accessible-rec`: owners reach
+  (and auto-create) their own sheets; a foreign sheet is reachable iff it
+  exists and is `:public`. Unauthenticated → redirect `/login` (page) or an
+  `$err` toast / 403 (API, stream). `?s=<name>` opens your own sheet,
+  `?u=<owner>&s=<name>` someone else's shared one.
+- **Sharing**: owner-only `POST /share` toggles `:public` (persisted
+  immediately); the `#sharebar` toolbar fragment shows the toggle + share link
+  to the owner, a "shared by <name>" badge to visitors. Anyone signed-in can
+  edit a public sheet (live collaboration); there is no read-only tier yet.
+  **Unsharing evicts**: going public→private reaps every non-owner session on
+  the sheet (`evict-foreign!`) so their stream drops and further access fails.
+- **Sheet picker**: the toolbar `#sheetpicker` dropdown lists the user's sheets
+  (`store/list-names`) and navigates on change; `#sheetbox` opens/creates a
+  sheet by a new name.
+- **Presence**: sessions carry `:uid`/`:uname`; peer markers show the real
+  user name ("Bob editing…").
 
 ## Web layer (`web`)
 
@@ -156,17 +209,24 @@ that the client `translate`s.
 
 ### Endpoints
 
-- `GET /` — page for `?s=<sheet-id>` (default `default`).
+- `GET /` — page for `?s=<name>` (own sheet, default `default`) or
+  `?u=<owner>&s=<name>` (foreign shared sheet); redirects to `/login` when
+  unauthenticated, 403 page when denied.
+- `GET /login`, `GET /auth/<provider>[/callback]`, `GET /auth/dev?name=`,
+  `POST /logout` — identity (see above).
+- `POST /share` — owner-only `:public` toggle; patches `#sharebar`.
 - `GET /app.js`, `GET /datastar.js` — vendored assets.
-- `GET /stream?sid=&s=` — **persistent** per-session SSE. Registers the session,
-  stores its generator, flushes once to establish the stream. Stays open.
+- `GET /stream?sid=&s=` — **persistent** per-session SSE (auth + access checked;
+  403 otherwise). Registers the session, stores its generator, flushes once to
+  establish the stream. Stays open.
 - `POST /cell` — edit (Datastar `@post`, signals carry `cell/v/sheet/sid`).
   Edits, settles, autosaves, returns the editor's window patch + `$err`, and
   **broadcasts** the change to other sessions on the sheet.
 - `POST /view` — window change (signals carry `r0/c0/sheet/sid`). Patches
   `#cells/#colhead/#rowhead` inner + `#meta`.
 - `POST /session/end` — `navigator.sendBeacon` on `pagehide` → `reap-session!`.
-- `GET /debug` — session/sheet detail (dev only).
+- `GET /debug` — session/sheet detail; only served while the dev auth provider
+  is active (404 otherwise).
 
 ### Sessions & sheet lifecycle
 
@@ -238,7 +298,10 @@ mid-edit). Two absolutely-positioned layers inside `#cellclip`, translated with
 
 `clojure -X:test` — `addr`, `engine` (literals, chains, ranges, formula-over-
 formula, structural rebuild, errors, cycles), `store` (save/load roundtrip,
-valid-id). Currently 15 tests / 58 assertions. Web/session/collab behavior is
+valid-id, ownership envelope, fmt-1 legacy, storage-id split), `auth` (dev
+login, uid sanitizing, cookie roundtrip, token revocation), `db` (user upsert +
+created-at stability, token roundtrip/revoke, per-test isolation — `:memory`
+backend). Currently 26 tests / 101 assertions. Web/session/collab behavior is
 verified manually + via curl (see CLAUDE.md); no web unit tests yet.
 
 ## Build & release
