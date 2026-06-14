@@ -150,6 +150,11 @@ await chain).
   immediately); the `#sharebar` toolbar fragment shows the toggle + share link
   to the owner, a "shared by <name>" badge to visitors. Anyone signed-in can
   edit a public sheet (live collaboration); there is no read-only tier yet.
+  **Unsharing evicts**: going public→private reaps every non-owner session on
+  the sheet (`evict-foreign!`) so their stream drops and further access fails.
+- **Sheet picker**: the toolbar `#sheetpicker` dropdown lists the user's sheets
+  (`store/list-names`) and navigates on change; `#sheetbox` opens/creates a
+  sheet by a new name.
 - **Presence**: sessions carry `:uid`/`:uname`; peer markers show the real
   user name ("Bob editing…").
 

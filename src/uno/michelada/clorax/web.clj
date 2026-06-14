@@ -338,6 +338,24 @@
 
 (declare share-html)
 
+(defn- sheet-picker
+  "Dropdown of the signed-in user's sheets for quick switching. Selecting one
+   navigates to it. When viewing a sheet you don't own, a leading disabled
+   option shows it (and the list still lets you jump back to one of yours)."
+  [uid storage-id sname]
+  (let [names     (store/list-names uid)
+        [owner _] (store/split-id storage-id)
+        own?      (= owner uid)
+        mine      (if own? (distinct (cons sname names)) names)]
+    [:select {:id "sheetpicker" :title "your sheets"
+              :data-on:change "el.value && (location.href='/?s='+el.value)"
+              :style (str "max-width:9rem;font:13px sans-serif;padding:5px 6px;"
+                          "border:1px solid #bbb;border-radius:4px;background:#f6f6f6;")}
+     (when-not own?
+       [:option {:value "" :selected true} (str "↗ " sname)])
+     (for [n mine]
+       [:option {:value n :selected (and own? (= n sname))} n])]))
+
 (defn- page [sh storage-id sname uid]
   (str
    "<!doctype html>"
@@ -366,12 +384,13 @@
              :style (str "position:fixed;top:1rem;right:1rem;max-width:26rem;background:#c0392b;"
                          "color:#fff;padding:.6rem .9rem;border-radius:6px;font:13px sans-serif;"
                          "cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.3);z-index:20;")}]
-      ;; sheet switcher + address box (jump) + formula bar + sharing + identity
+      ;; sheet picker + new-sheet box + address box (jump) + formula bar + sharing + identity
       [:div {:style "display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem;"}
-       [:input {:id "sheetbox" :value sname :placeholder "sheet"
-                :data-on:keydown "evt.key==='Enter' && (location.href='/?s='+el.value)"
-                :title "sheet name — Enter to open (yours)"
-                :style (str "width:7rem;font:13px sans-serif;padding:5px 6px;"
+       (sheet-picker uid storage-id sname)
+       [:input {:id "sheetbox" :placeholder "new sheet…"
+                :data-on:keydown "evt.key==='Enter' && el.value && (location.href='/?s='+el.value)"
+                :title "type a name + Enter to create/open one of your sheets"
+                :style (str "width:6rem;font:13px sans-serif;padding:5px 6px;"
                             "border:1px solid #bbb;border-radius:4px;background:#f6f6f6;")}]
        [:input {:id "addrbox" :data-bind:sel "" :placeholder "A1"
                 :data-on:keydown "evt.key==='Enter' && jump($sel)"
@@ -714,15 +733,28 @@
                       :style (str "width:18rem;font:12px monospace;padding:4px 6px;"
                                   "border:1px solid #ddd;border-radius:4px;color:#555;")}])]))))
 
+(defn- evict-foreign!
+  "Reap every session on `sheet-id` whose user is not `owner-uid`. Called when a
+   sheet is unshared so collaborators lose their live stream immediately; their
+   next /cell, /view or /stream reconnect then fails the access check."
+  [sheet-id owner-uid]
+  (doseq [[sid s] @sessions*]
+    (when (and (= sheet-id (:sheet s)) (not= owner-uid (:uid s)))
+      (reap-session! sid))))
+
 (defn- handle-share
-  "Owner-only toggle of a sheet's :public flag; patches #sharebar back."
+  "Owner-only toggle of a sheet's :public flag; patches #sharebar back. On
+   UNSHARE, evicts collaborators already on the sheet (their access is gone)."
   [req]
   (with-owner req
     (fn [uid sheet-id _rec {:keys [sid]} gen]
       (ensure-session! sid sheet-id uid)
-      (swap! sheets* update-in [sheet-id :public] not)
-      (save-rec! sheet-id)
-      (d*/patch-elements! gen (share-html uid sheet-id)))))
+      (let [public? (get-in (swap! sheets* update-in [sheet-id :public] not)
+                            [sheet-id :public])]
+        (save-rec! sheet-id)
+        (when-not public?            ; just went public -> private
+          (evict-foreign! sheet-id uid))
+        (d*/patch-elements! gen (share-html uid sheet-id))))))
 
 ;; --- auth routes (login page, OAuth redirects, logout) -------------------
 

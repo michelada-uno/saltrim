@@ -141,16 +141,19 @@ REMAINING:
 - **No read-only tier**: a public sheet is editable by any signed-in user.
   Sharing levels (view/edit) need a richer ACL than the single :public flag —
   the fmt-2 envelope leaves room.
-- **Unsharing doesn't evict** collaborators already on the sheet: their
-  sessions stay until they leave (writes keep working). Check access per
-  /cell against the live record, or reap foreign sessions on unshare.
+- **Unsharing evicts collaborators — DONE.** `handle-share` reaps every
+  non-owner session on the sheet (`evict-foreign!`) when it goes public→private;
+  their held streams close and the next /cell, /view or /stream reconnect fails
+  the access check. Verified via /debug + two-client curl.
 - **Real-provider flows untested live**: GitHub/Google were implemented to
   spec but only exercised with the provider unconfigured (redirect + error
   paths). Needs one manual run with real client ids.
 - **Legacy un-namespaced sheets** (`data/default.edn` etc.) are no longer
   served — only `owner__name` ids resolve. Claim by renaming the file to
   `<uid>__<name>.edn` (loads as fmt 1 = public, next save upgrades to fmt 2).
-- **No sheet picker**: `store/list-names` exists but the UI is still the
-  name box (Enter opens). A dropdown of your sheets would help.
+- **Sheet picker — DONE.** The toolbar has a `#sheetpicker` dropdown of the
+  signed-in user's sheets (`store/list-names`); selecting one navigates to it.
+  A foreign shared sheet shows as a leading `↗ <name>` option. The `#sheetbox`
+  text input remains for creating/opening a sheet by a new name.
 - **OAuth state + auth sessions are single-node** (in-memory nonces, atom
   registries). Fine for the current single-JVM deploy.
