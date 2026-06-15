@@ -12,7 +12,8 @@
    We keep history (`:keep-history? true`) deliberately — `as-of` underpins the
    planned audit/branching features. Tokens are stored as a SHA-256 hash of the
    cookie secret (the cookie carries the secret; the DB never sees it)."
-  (:require [datahike.api :as d]
+  (:require [clojure.string :as str]
+            [datahike.api :as d]
             [konserve-jdbc.core]                      ; registers the konserve :jdbc store
             [konserve.store :refer [validate-store-config]]
             [uno.michelada.clorax.util :as util]))
@@ -208,25 +209,84 @@
   [sheet-id]
   (boolean (some #(= :everyone (:kind %)) (sheet-grants sheet-id))))
 
-(defn- everyone-eid [sheet-id]
-  (d/q '[:find ?s . :in $ ?sid
+(defn- grant-eid [sheet-id grantee kind]
+  (d/q '[:find ?s . :in $ ?sid ?g ?k
          :where [?sh :sheet/id ?sid] [?s :share/sheet ?sh]
-                [?s :share/grantee-kind :everyone]]
-       @(conn) sheet-id))
+                [?s :share/grantee ?g] [?s :share/grantee-kind ?k]]
+       @(conn) sheet-id grantee kind))
+
+(defn grant-level
+  "The level (:read | :read-write) of the (grantee, kind) grant on `sheet-id`,
+   or nil if there is none."
+  [sheet-id grantee kind]
+  (when-let [eid (grant-eid sheet-id grantee kind)]
+    (:share/level (d/pull @(conn) [:share/level] eid))))
+
+(defn set-share!
+  "Create or update the (grantee, kind) grant on `sheet-id` to `level`
+   (:read | :read-write). Idempotent — an existing grant is updated in place.
+   Requires the sheet entity to exist (call `ensure-sheet!` first). Returns
+   `level`."
+  [sheet-id grantee kind level]
+  (let [eid (grant-eid sheet-id grantee kind)
+        tx  (cond-> {:share/sheet [:sheet/id sheet-id]
+                     :share/grantee grantee
+                     :share/grantee-kind kind
+                     :share/level level
+                     :share/created-at (now)}
+              eid (assoc :db/id eid))]
+    (d/transact (conn) [tx])
+    level))
+
+(defn remove-share!
+  "Retract the (grantee, kind) grant on `sheet-id`, if present. Returns true iff
+   something was removed."
+  [sheet-id grantee kind]
+  (when-let [eid (grant-eid sheet-id grantee kind)]
+    (d/transact (conn) [[:db/retractEntity eid]])
+    true))
+
+(defn public-level
+  "The public (:everyone) level for `sheet-id` — :read | :read-write | nil."
+  [sheet-id]
+  (grant-level sheet-id "*" :everyone))
 
 (defn set-public!
-  "Add (on? true) or remove (on? false) the public :everyone/:read-write grant
-   on `sheet-id`. Idempotent. Returns the resulting boolean state. Requires the
-   sheet entity to exist (call `ensure-sheet!` first)."
-  [sheet-id on?]
-  (let [eid (everyone-eid sheet-id)]
-    (cond
-      (and on? (not eid))
-      (d/transact (conn) [{:share/sheet [:sheet/id sheet-id]
-                           :share/grantee "*"
-                           :share/grantee-kind :everyone
-                           :share/level :read-write
-                           :share/created-at (now)}])
-      (and (not on?) eid)
-      (d/transact (conn) [[:db/retractEntity eid]]))
-    (boolean on?)))
+  "Set the public (:everyone) grant on `sheet-id` to `level` (:read |
+   :read-write), or remove it when `level` is nil/false. Returns `level`."
+  [sheet-id level]
+  (if level
+    (set-share! sheet-id "*" :everyone level)
+    (remove-share! sheet-id "*" :everyone))
+  (or level nil))
+
+(defn sheets-shared-with
+  "Sheets directly shared TO `uid` (a :user grant) as maps
+   {:sheet-id :name :level} — drives the 'shared with me' picker section.
+   Excludes :everyone (public) grants, which would be the whole world."
+  [uid]
+  (->> (d/q '[:find ?id ?name ?level
+              :in $ ?uid
+              :where [?s :share/grantee ?uid] [?s :share/grantee-kind :user]
+                     [?s :share/level ?level] [?s :share/sheet ?sh]
+                     [?sh :sheet/id ?id]
+                     [(get-else $ ?sh :sheet/name "") ?name]]
+            @(conn) uid)
+       (map (fn [[id name level]] {:sheet-id id :name name :level level}))
+       (sort-by :sheet-id)
+       vec))
+
+(defn uid-by-email
+  "The uid of an existing user whose email matches (case-insensitive), or nil.
+   Used to resolve a prod share-by-email to a uid (we only share to people who
+   have signed in at least once)."
+  [email]
+  (let [e (some-> email str/trim str/lower-case)]
+    (when (and e (not= e ""))
+      (d/q '[:find ?uid .
+             :in $ ?e
+             :where [?u :user/email ?em]
+                    [(clojure.string/lower-case ?em) ?eml]
+                    [(= ?eml ?e)]
+                    [?u :user/uid ?uid]]
+           @(conn) e))))

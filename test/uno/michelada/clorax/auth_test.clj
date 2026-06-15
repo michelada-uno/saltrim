@@ -41,6 +41,16 @@
   (is (nil? (auth/req->uid {:headers {"cookie" "clorax_auth=nothex"}})))
   (is (nil? (auth/req->uid {:headers {"cookie" (str "clorax_auth=" (apply str (repeat 64 "f")))}}))))
 
+(deftest resolve-grantee-dev-uses-name
+  ;; dev mode (no provider env) — a name resolves to the deterministic dev uid,
+  ;; whether or not that person has logged in yet.
+  (is (auth/dev-auth?))
+  (is (= "dev-bob"          (auth/resolve-grantee "Bob")))
+  (is (= "dev-test-ser-42"  (auth/resolve-grantee "Test Üser 42"))
+      "same sanitization as dev-login")
+  (is (nil? (auth/resolve-grantee "   ")))
+  (is (nil? (auth/resolve-grantee "!!!"))))
+
 (deftest unknown-provider-rejected
   (is (:error (auth/callback! :nope "code" "state")))
   (is (nil? (auth/login-url :github))))   ; not configured in test env

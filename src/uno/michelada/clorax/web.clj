@@ -81,7 +81,7 @@
             [o n]    (store/split-id id)
             owner    (or (:owner rec) o)
             new?     (db/ensure-sheet! id owner n)]
-        (when (and new? (:public rec)) (db/set-public! id true))
+        (when (and new? (:public rec)) (db/set-public! id :read-write))
         (let [rec (assoc rec :owner owner :public (db/public? id))]
           (swap! sheets* assoc id rec)
           rec))))
@@ -350,21 +350,31 @@
 (declare share-html)
 
 (defn- sheet-picker
-  "Dropdown of the signed-in user's sheets for quick switching. Selecting one
-   navigates to it. When viewing a sheet you don't own, a leading disabled
-   option shows it (and the list still lets you jump back to one of yours)."
+  "Dropdown for switching sheets, grouped into 'your sheets' (👤) and 'shared
+   with you' (✎ edit / 👁 view). Selecting one navigates to it. A foreign sheet
+   reached by a public link (in neither group) shows as a leading ↗ option."
   [uid storage-id sname]
-  (let [names     (store/list-names uid)
-        [owner _] (store/split-id storage-id)
-        own?      (= owner uid)
-        mine      (if own? (distinct (cons sname names)) names)]
+  (let [names       (store/list-names uid)
+        [owner _]   (store/split-id storage-id)
+        own?        (= owner uid)
+        mine        (if own? (distinct (cons sname names)) names)
+        shared      (db/sheets-shared-with uid)
+        cur-shared? (some #(= storage-id (:sheet-id %)) shared)]
     [:select {:id "sheetpicker" :class "tool" :title "your sheets"
-              :data-on:change "el.value && (location.href='/?s='+el.value)"
-              :style "max-width:9rem;"}
-     (when-not own?
+              :data-on:change "el.value && (location.href='/?'+el.value)"
+              :style "max-width:11rem;"}
+     (when (and (not own?) (not cur-shared?))
        [:option {:value "" :selected true} (str "↗ " sname)])
-     (for [n mine]
-       [:option {:value n :selected (and own? (= n sname))} n])]))
+     [:optgroup {:label "your sheets"}
+      (for [n mine]
+        [:option {:value (str "s=" n) :selected (and own? (= n sname))} (str "👤 " n)])]
+     (when (seq shared)
+       [:optgroup {:label "shared with you"}
+        (for [{:keys [sheet-id name level]} shared
+              :let [[o nm] (store/split-id sheet-id)
+                    icon   (if (= level :read-write) "✎" "👁")]]
+          [:option {:value (str "u=" o "&s=" nm) :selected (= sheet-id storage-id)}
+           (str icon " " (if (str/blank? name) nm name))])])]))
 
 (defn- page [sh storage-id sname uid]
   (str
@@ -431,7 +441,10 @@
                 "border-radius:3px 3px 3px 0;white-space:nowrap;}"))]
       [:script {:type "module" :src "/datastar.js"}]
       [:script {:src "/app.js"}]]
-     [:body {:data-signals (format "{cell:'', v:'', err:'', sel:'', edit:false, r0:0, c0:0, sheet:'%s', sid:''}" storage-id)
+     [:body {:data-signals (format (str "{cell:'', v:'', err:'', sel:'', edit:false, r0:0, c0:0, "
+                                        "sheet:'%s', sid:'', sharepanel:false, shareact:'', "
+                                        "plevel:'', gtarget:'', glevel:'read-write', grantee:''}")
+                                   storage-id)
              :style "font-family:sans-serif;margin:0;padding:.6rem;"}
       ;; hidden input carrying the session id into $sid, and a hidden trigger
       ;; /app.js clicks to open the persistent collaboration stream via Datastar
@@ -639,10 +652,19 @@
 ;; (or short-circuit with a denial). These replace the gate boilerplate that
 ;; otherwise repeats in every handler.
 
+(defn- owner-of [id] (first (store/split-id id)))
+
+(defn- level-of
+  "This user's effective level on the sheet: owners get :read-write; everyone
+   else gets whatever the ACL grants (:read-write | :read). nil = no access."
+  [uid id rec]
+  (if (= uid (:owner rec)) :read-write (db/access-level uid id)))
+
 (defn- with-access
   "POST handlers: resolve the signed-in user and sheet access from the request
    signals. On success open the one-shot SSE response and call
-   (f uid sheet-id rec sig gen); otherwise raise the access/auth error toast."
+   (f uid sheet-id rec sig gen); otherwise raise the access/auth error toast.
+   The rec handed to `f` carries this user's effective `:level`."
   [req f]
   (let [uid      (auth/req->uid req)
         sig      (read-signals req)
@@ -650,7 +672,8 @@
         rec      (accessible-rec uid sheet-id)]
     (if-not rec
       (deny req (if uid "no access to this sheet" "not signed in"))
-      (sse req (fn [gen] (f uid sheet-id rec sig gen))))))
+      (let [rec (assoc rec :level (level-of uid sheet-id rec))]
+        (sse req (fn [gen] (f uid sheet-id rec sig gen)))))))
 
 (defn- with-owner
   "Like `with-access`, but requires the user to OWN the (already-loaded) sheet —
@@ -680,10 +703,12 @@
   (with-access req
     (fn [uid sheet-id rec {:keys [cell v sid]} gen]
       (ensure-session! sid sheet-id uid)        ; lazy re-register + keep alive
-      (let [sh   (:sh rec)
-            view (session-view sid)]
-        (when (addr/valid? cell)
-          (locking edit-lock
+      (if (not= :read-write (:level rec))
+        (signals! gen {:err "read-only access — you can't edit this sheet"})
+        (let [sh   (:sh rec)
+              view (session-view sid)]
+          (when (addr/valid? cell)
+            (locking edit-lock
             (try
               (when (locked-by-other? sid sheet-id cell)
                 (throw (ex-info "locked by another collaborator" {:locked cell})))
@@ -703,7 +728,7 @@
                 ;; collaborators: push the same change to their streams
                 (broadcast! sid sheet-id sh affected))
               (catch Throwable e
-                (signals! gen {:err (str cell ": " (pretty-err (.getMessage e)))})))))))))
+                (signals! gen {:err (str cell ": " (pretty-err (.getMessage e)))}))))))))))
 
 (defn- handle-view [req]
   (with-access req
@@ -734,11 +759,14 @@
    #self overlay back, and re-broadcasts #peers to everyone else on the sheet."
   [req]
   (with-access req
-    (fn [uid sheet-id _rec {:keys [sel edit sid]} gen]
+    (fn [uid sheet-id rec {:keys [sel edit sid]} gen]
       (ensure-session! sid sheet-id uid)
-      (swap! sessions* update sid assoc
-             :cursor  (when (addr/valid? sel) sel)
-             :editing (when (and edit (addr/valid? sel)) sel))
+      (let [can-write? (= :read-write (:level rec))]
+        (swap! sessions* update sid assoc
+               :cursor  (when (addr/valid? sel) sel)
+               ;; a read-only viewer may move their cursor but never hold an
+               ;; edit lock (which would block writers on a cell they can't edit)
+               :editing (when (and edit can-write? (addr/valid? sel)) sel)))
       ;; peers' #peers via their persistent streams; this session's #self via
       ;; the one-shot @post response (the gen this gate opened).
       (broadcast-presence! sheet-id)
@@ -783,47 +811,116 @@
 
 ;; --- sharing -------------------------------------------------------------
 
-(defn- share-html
-  "The #sharebar toolbar fragment. The owner gets the public/private toggle
-   (plus the share link when public); a visiting collaborator sees a badge."
-  [uid sheet-id]
-  (let [{:keys [owner public]} (@sheets* sheet-id)
-        [_ sname] (store/split-id sheet-id)
-        url (str (auth/base-url) "/?u=" owner "&s=" sname)]
-    (str (h/html
-          [:div {:id "sharebar" :style "display:flex;align-items:center;gap:.4rem;"}
-           (if (= uid owner)
-             [:button {:class "btn" :data-on:click "@post('/share')" :title "toggle sharing"}
-              (if public "🌐 shared" "🔒 private")]
-             [:span {:style "font:12px sans-serif;color:#666;"}
-              (str "🌐 shared by " (or (:name (auth/user-info owner)) owner))])
-           (when (and (= uid owner) public)
-             [:input {:readonly true :value url :title "share link"
-                      :style (str "width:18rem;font:12px monospace;padding:4px 6px;"
-                                  "border:1px solid #ddd;border-radius:4px;color:#555;")}])]))))
+(defn- level-kw
+  "Parse a level string from the share UI: \"read\"/\"read-write\" -> keyword,
+   anything else (incl. \"none\") -> nil (= no access)."
+  [s]
+  (case (str s) "read" :read "read-write" :read-write nil))
 
-(defn- evict-foreign!
-  "Reap every session on `sheet-id` whose user is not `owner-uid`. Called when a
-   sheet is unshared so collaborators lose their live stream immediately; their
-   next /cell, /view or /stream reconnect then fails the access check."
-  [sheet-id owner-uid]
-  (doseq [[sid s] @sessions*]
-    (when (and (= sheet-id (:sheet s)) (not= owner-uid (:uid s)))
-      (reap-session! sid))))
+(defn- level-label [lvl]
+  (case lvl :read-write "can edit" :read "can view" "no access"))
+
+(defn- share-html
+  "The #sharebar fragment. Visitors see a read-only badge. The owner gets a
+   popover (toggled by $sharepanel) to set the public level, copy the link, and
+   grant/revoke direct per-user shares (by name in dev, email in prod)."
+  [uid sheet-id]
+  (let [owner     (owner-of sheet-id)
+        [_ sname] (store/split-id sheet-id)
+        owner?    (= uid owner)
+        pub       (db/public-level sheet-id)          ; :read | :read-write | nil
+        grants    (->> (db/sheet-grants sheet-id)
+                       (filter #(= :user (:kind %)))
+                       (sort-by :grantee))
+        url       (str (auth/base-url) "/?u=" owner "&s=" sname)
+        badge     (cond (= pub :read-write) "🌐 public" (= pub :read) "👁 public" :else "🔒 private")
+        add-ph    (if (auth/dev-auth?) "name to share with…" "email to share with…")
+        row-style "display:flex;align-items:center;gap:.4rem;margin-bottom:.45rem;"]
+    (str (h/html
+          [:div {:id "sharebar" :style "display:flex;align-items:center;gap:.4rem;position:relative;"}
+           (if-not owner?
+             [:span {:style "font:12px sans-serif;color:var(--muted);white-space:nowrap;"}
+              (str "shared by " (or (:name (auth/user-info owner)) owner)
+                   " · " (level-label (db/access-level uid sheet-id)))]
+             (list
+              [:button {:class "btn" :data-on:click "$sharepanel = !$sharepanel" :title "sharing"}
+               badge]
+              [:div {:data-show "$sharepanel"
+                     :style (str "position:absolute;top:118%;left:0;z-index:30;width:23rem;"
+                                 "background:var(--bg);border:1px solid var(--line);border-radius:6px;"
+                                 "box-shadow:0 4px 16px rgba(0,0,0,.18);padding:.7rem;"
+                                 "font:12px sans-serif;color:var(--fg);")}
+               ;; public level
+               [:div {:style row-style}
+                [:span {:style "flex:1;"} "Anyone with the link"]
+                [:select {:class "tool"
+                          :data-on:change "$shareact='public', $plevel=el.value, @post('/share')"}
+                 [:option {:value "none"       :selected (nil? pub)}          "no access"]
+                 [:option {:value "read"       :selected (= pub :read)}       "can view"]
+                 [:option {:value "read-write" :selected (= pub :read-write)} "can edit"]]]
+               (when pub
+                 [:input {:readonly true :value url :title "share link"
+                          :style (str "width:100%;box-sizing:border-box;font:11px monospace;"
+                                      "padding:4px 6px;border:1px solid var(--grid);"
+                                      "border-radius:var(--radius);color:var(--muted);margin-bottom:.5rem;")}])
+               ;; per-user grants
+               [:div {:style "border-top:1px solid var(--grid);padding-top:.5rem;"}
+                (if (seq grants)
+                  (for [{:keys [grantee level]} grants]
+                    [:div {:style row-style}
+                     [:span {:style "flex:1;"} (or (:name (auth/user-info grantee)) grantee)]
+                     [:span {:style "color:var(--muted);"} (level-label level)]
+                     [:button {:class "btn" :title "remove"
+                               :data-on:click (str "$shareact='revoke', $grantee='" grantee "', @post('/share')")}
+                      "✕"]])
+                  [:div {:style "color:var(--muted);margin-bottom:.45rem;"} "not shared with anyone yet"])
+                ;; add person
+                [:div {:style "display:flex;gap:.3rem;margin-top:.4rem;"}
+                 [:input {:class "tool" :data-bind:gtarget "" :placeholder add-ph :style "flex:1;"}]
+                 [:select {:class "tool" :data-bind:glevel ""}
+                  [:option {:value "read-write"} "edit"]
+                  [:option {:value "read"} "view"]]
+                 [:button {:class "btn" :data-on:click "$shareact='grant', @post('/share')"} "share"]]]]))]))))
+
+(defn- evict-unauthorized!
+  "Reap every NON-OWNER session on `sheet-id` whose access was just revoked
+   (access-level now nil) — e.g. public turned off, or their direct grant
+   removed. Their held stream closes; the next request 403s. A mere downgrade
+   (edit -> view) is NOT evicted; the /cell write-guard handles it."
+  [sheet-id]
+  (let [owner (owner-of sheet-id)]
+    (doseq [[sid s] @sessions*]
+      (when (and (= sheet-id (:sheet s))
+                 (not= owner (:uid s))
+                 (nil? (db/access-level (:uid s) sheet-id)))
+        (reap-session! sid)))))
 
 (defn- handle-share
-  "Owner-only toggle of a sheet's :public flag; patches #sharebar back. On
-   UNSHARE, evicts collaborators already on the sheet (their access is gone)."
+  "Owner-only sharing mutations, dispatched on the $shareact signal:
+   - public: set the :everyone level from $plevel (none/read/read-write)
+   - grant:  share to the $gtarget person at $glevel (resolve name/email -> uid)
+   - revoke: drop the $grantee user grant
+   Re-renders #sharebar and evicts anyone who just lost access."
   [req]
   (with-owner req
-    (fn [uid sheet-id _rec {:keys [sid]} gen]
+    (fn [uid sheet-id _rec {:keys [sid shareact plevel gtarget glevel grantee]} gen]
       (ensure-session! sid sheet-id uid)
-      (let [now-public? (db/set-public! sheet-id (not (db/public? sheet-id)))]
-        (swap! sheets* assoc-in [sheet-id :public] now-public?)
+      (let [err (case (str shareact)
+                  "public" (do (db/set-public! sheet-id (level-kw plevel)) nil)
+                  "grant"  (if-let [g (auth/resolve-grantee gtarget)]
+                             (if (= g uid)
+                               "that's you — you already own this sheet"
+                               (do (db/set-share! sheet-id g :user (or (level-kw glevel) :read-write)) nil))
+                             "no signed-in user matches that (they must sign in first)")
+                  "revoke" (do (when-not (str/blank? (str grantee))
+                                 (db/remove-share! sheet-id grantee :user))
+                               nil)
+                  nil)]
+        (swap! sheets* assoc-in [sheet-id :public] (db/public? sheet-id))
         (save-rec! sheet-id)
-        (when-not now-public?        ; just went public -> private
-          (evict-foreign! sheet-id uid))
-        (d*/patch-elements! gen (share-html uid sheet-id))))))
+        (evict-unauthorized! sheet-id)
+        (d*/patch-elements! gen (share-html uid sheet-id))
+        (signals! gen {:err (or err "") :gtarget ""})))))
 
 ;; --- auth routes (login page, OAuth redirects, logout) -------------------
 
