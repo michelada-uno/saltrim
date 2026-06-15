@@ -100,3 +100,67 @@
     (testing "disallowed symbol rejected at set time"
       (is (thrown? clojure.lang.ExceptionInfo
                    (put s "B3" "=(slurp \"/etc/passwd\")"))))))
+
+(deftest axis-sizing
+  (testing "set / read / clear per-axis sizes"
+    (let [s (mk)]
+      (sh/set-col-width! s 2 200)
+      (sh/set-row-height! s 4 40)
+      (is (= 200 (sh/col-width s 2)))
+      (is (= 40 (sh/row-height s 4)))
+      (is (nil? (sh/col-width s 0)) "unset -> nil (caller defaults)")
+      (sh/set-col-width! s 2 0)
+      (is (nil? (sh/col-width s 2)) "non-positive clears")))
+  (testing "sizing round-trips through the document"
+    (let [s (mk)]
+      (sh/set-col-width! s 1 150)
+      (sh/set-row-height! s 3 30)
+      (let [s2 (mk)]
+        (sh/load-sizing! s2 (sh/col-widths s) (sh/row-heights s))
+        (is (= 150 (sh/col-width s2 1)))
+        (is (= 30 (sh/row-height s2 3)))))))
+
+(deftest cell-style
+  (testing "literal style prop"
+    (let [s (mk)]
+      (sh/set-style! s "A1" :bg "tomato")
+      (is (= "tomato" (sh/style-value s "A1" :bg)))))
+  (testing "$val style recomputes reactively with the cell value"
+    (let [s (mk)]
+      (put s "A1" "50")
+      (sh/set-style! s "A1" :bg "=(if (> $val 100) \"tomato\" \"white\")")
+      (sh/settle! s)
+      (is (= "white" (sh/style-value s "A1" :bg)) "below threshold")
+      (put s "A1" "150")
+      (sh/settle! s)
+      (is (= "tomato" (sh/style-value s "A1" :bg)) "recompute on value change")))
+  (testing "style may reference ANOTHER cell; style-dependents tracks the edge"
+    (let [s (mk)]
+      (put s "A1" "1") (put s "B1" "10")
+      (sh/set-style! s "A1" :bg "=(if (> #cell B1 5) \"red\" \"green\")")
+      (sh/settle! s)
+      (is (= "red" (sh/style-value s "A1" :bg)))
+      (is (contains? (sh/style-dependents s "B1") "A1") "B1 change must re-render A1")))
+  (testing "broken style formula surfaces {:error}, not silent nil"
+    (let [s (mk)]
+      (put s "A1" "5")
+      (sh/set-style! s "A1" :bg "=(+ $val \"x\")")    ; numeric + string -> error
+      (sh/settle! s)
+      (let [v (sh/style-value s "A1" :bg)]
+        (is (map? v))
+        (is (:error v)))
+      (is (= [:bg] (map first (sh/style-errors s "A1"))) "listed for the toast")))
+  (testing "blank removes the prop"
+    (let [s (mk)]
+      (sh/set-style! s "A1" :bg "tomato")
+      (sh/set-style! s "A1" :bg "")
+      (is (nil? (sh/style-value s "A1" :bg)))))
+  (testing "style source round-trips through the document"
+    (let [s (mk)]
+      (put s "A1" "150")
+      (sh/set-style! s "A1" :bg "=(if (> $val 100) \"tomato\" \"white\")")
+      (let [doc (sh/document s)
+            s2  (mk)]
+        (sh/load-document! s2 doc)
+        (sh/settle! s2)
+        (is (= "tomato" (sh/style-value s2 "A1" :bg)) "reloads + recomputes")))))
