@@ -135,11 +135,21 @@ REMAINING:
   share` toggles the grant. The file envelope still carries `:public` (vestigial
   migration seed; harmless). Sheet ids stay `<owner>__<name>` strings (the uuid
   switch was NOT needed and is deferred).
-  REMAINING (PR-B): **direct user grants** (`:user` kind — share to one uid by
-  name in dev / email in prod) and a **read-only tier** (the `:read` level +
-  `/cell` write-guard); the schema + `access-level` already model both. A share
-  **panel UI** (list grantees, add/remove, level picker) and per-sheet picker
-  **level icons** land with it.
+- **Read-only tier + direct user grants — DONE (Datahike step 2b).** Public is
+  now a level (`:everyone`/`:read` view OR `:read-write` edit), and owners can
+  grant **direct per-user shares** (`:user` kind; resolved by name in dev /
+  email in prod via `auth/resolve-grantee` → `db/uid-by-email`). `with-access`
+  threads the caller's effective `:level` into the rec; `handle-cell` rejects a
+  write when it isn't `:read-write`, and `handle-presence` won't let a viewer
+  hold an edit lock. `handle-share` dispatches on a `$shareact` signal
+  (public/grant/revoke); `evict-unauthorized!` reaps only sessions that LOST
+  access (a downgrade isn't evicted — the write-guard covers it). UI: owner
+  share **panel** (public level select + link + grant list/add/remove) and a
+  picker that groups 'your sheets' (👤) and 'shared with you' (✎/👁).
+  REMAINING: **group/org grants** (`:group` kind is in the schema but unused);
+  email shares only reach users who've already signed in (no pending invites);
+  a `:read` viewer with an open editor sees writes blocked only on commit (no
+  proactive UI lock-out).
 - **Spindel pinned at 0.1.15**: 0.1.23 changes spin-cancellation semantics and
   breaks the structural-rebuild path (recomputed cells come back
   `{:error "Spin cancelled by user"}`; 2 engine-test failures). Bumping spindel
@@ -147,9 +157,8 @@ REMAINING:
 - **Datahike create→connect pause**: first-run creation sleeps ~300 ms before
   `connect` to dodge konserve-jdbc's async c3p0 pool close. Works, but a retry/
   await on a readiness signal would be cleaner than a fixed sleep.
-- **No read-only tier**: a public sheet is editable by any signed-in user.
-  Sharing levels (view/edit) need a richer ACL than the single :public flag —
-  the fmt-2 envelope leaves room.
+- **Read-only tier — DONE.** Sharing now has view/edit levels (see the
+  Datahike step 2b note above); a public sheet can be read-only.
 - **Unsharing evicts collaborators — DONE.** `handle-share` reaps every
   non-owner session on the sheet (`evict-foreign!`) when it goes public→private;
   their held streams close and the next /cell, /view or /stream reconnect fails

@@ -225,6 +225,21 @@
         (catch Throwable e
           {:error (str "oauth error: " (.getMessage e))})))))
 
+(defn resolve-grantee
+  "Resolve a share-target string typed by an owner to a uid to grant to.
+   - dev mode: a NAME -> the deterministic `dev-<sanitized>` uid. The grantee
+     need not have logged in yet (the uid is stable), so dev sharing always
+     resolves a non-blank name.
+   - prod mode: an EMAIL -> the uid of an EXISTING user with that email, or nil
+     (we only share to people who have signed in at least once).
+   Returns a uid string, or nil when it can't resolve."
+  [s]
+  (let [s (str/trim (str s))]
+    (when-not (str/blank? s)
+      (if (dev-auth?)
+        (let [id (sanitize-id s)] (when-not (str/blank? id) (make-uid "dev" id)))
+        (db/uid-by-email s)))))
+
 (defn dev-login!
   "Name-only login (dev provider). Returns {:token :uid} or {:error msg}."
   [display-name]
