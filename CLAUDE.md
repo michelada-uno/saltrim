@@ -152,7 +152,13 @@ token in the URL, `?t=…`, rotatable) at a **read-only or edit** level, plus
 share panel; `/cell` write-guard enforces `:read` vs `:read-write`; the picker
 lists 'shared with you' sheets. There is no blanket public-to-everyone tier —
 broad sharing is the link (the old `:everyone` flag auto-migrates to a link).
-Next candidates (user's call):
-**style/format as reactive properties** (persistence format is ready for it),
-conflict policy, group/org grants (schema has `:group` kind). See `TECHDEBT.md`
-for deferred items.
+**Cell presentation** (PR #14): reactive per-cell style (`$val`, separate style
+layer, 5 CSS props) + number-format masks (`fmt` ns, `:format` prop) +
+per-column/row sizing (sparse `:cols`/`:rows`, prefix-sum virtualizer, drag to
+resize); in-app help modal + README user guide.
+
+**What's next lives in `ROADMAP.md`** (single source). Headline track: formula
+engine → **SCI** (fixes `let`/locals, enables per-sheet namespaces + user fns),
+collapsible-toolbar UI rework, **JS → CLJS**, then multi-selection + cut/copy/
+paste. Cheap wins: dependency-graph view, cell assertions. Boss fight: git-like
+branching (forces cells → Datahike). See `TECHDEBT.md` for deferred items.
