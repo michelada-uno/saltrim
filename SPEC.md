@@ -1,4 +1,4 @@
-# Clorax — technical spec
+# SaltRim — technical spec
 
 A spreadsheet whose **reactive core is Spindel** (signals/spins) and whose **UI
 is Datastar** (server-rendered HTML patched over SSE). Formulas are sandboxed
@@ -16,7 +16,7 @@ on load. Multiple clients edit one sheet live.
 - Vendored client: `resources/public/datastar.js` (Datastar **1.0.0**),
   `resources/public/app.js` (our client engine).
 
-## Namespaces (`src/uno/michelada/clorax/`, ns root `uno.michelada.clorax`)
+## Namespaces (`src/uno/michelada/saltrim/`, ns root `uno.michelada.saltrim`)
 
 | ns | role |
 |----|------|
@@ -86,7 +86,7 @@ Pipeline (`formula`):
    nested `fn` is **not** CPS-transformed (so ranges must expand statically at
    read time, which they do), and (b) **awaiting the same cell twice glitches**
    on recompute.
-4. `compile`: `eval (spin lifted)` in the `uno.michelada.clorax.formula` namespace so
+4. `compile`: `eval (spin lifted)` in the `uno.michelada.saltrim.formula` namespace so
    `spin`/`track`/`await` resolve and the CPS transform sees the effects.
 
 Sandbox = EDN reader + symbol whitelist + a fixed `eval` namespace. (SCI was
@@ -102,7 +102,7 @@ await chain).
 - Persist the **source document**, not the Spindel graph: `{addr {:value raw}}`,
   a per-cell **property map** (room for `:style`/`:format` later, each a reactive
   property compiled from its own source). EDN at `<dir>/<id>.edn`, where `dir`
-  is `CLORAX_DATA_DIR` (default `data/`).
+  is `SALTRIM_DATA_DIR` (default `data/`).
 - **fmt 2** wraps it in an ownership envelope:
   `{:fmt 2 :owner uid :public bool :cells …}`. fmt 1 files (pre-auth) load as
   owner nil + public true (legacy sheets stay readable). `load-record` returns
@@ -119,21 +119,21 @@ await chain).
 
 - **Login**: OAuth 2.0 authorization-code flow, hand-rolled over http-kit's
   client (`/auth/github`, `/auth/google` + `/callback`s; CSRF `state` nonces
-  with a 10-min TTL). A provider activates when `CLORAX_<PROVIDER>_CLIENT_ID`/
-  `_CLIENT_SECRET` env vars are set; `CLORAX_BASE_URL` builds redirect URIs.
+  with a 10-min TTL). A provider activates when `SALTRIM_<PROVIDER>_CLIENT_ID`/
+  `_CLIENT_SECRET` env vars are set; `SALTRIM_BASE_URL` builds redirect URIs.
   When **no** real provider is configured the **dev provider** (name-only form
-  on `/login`, `GET /auth/dev?name=`) is on by default — `CLORAX_DEV_AUTH=1/0`
+  on `/login`, `GET /auth/dev?name=`) is on by default — `SALTRIM_DEV_AUTH=1/0`
   forces it either way.
 - **Auth sessions**: 32-byte random token in an `HttpOnly; SameSite=Lax`
-  cookie (`clorax_auth`, 30 d; `Secure` when base-url is https). The cookie
+  cookie (`saltrim_auth`, 30 d; `Secure` when base-url is https). The cookie
   carries the secret; the DB stores only its **SHA-256 hash** (`db`, Datahike)
   — users and tokens survive restarts. `POST /logout` revokes the token **and
   reaps the user's live sessions** (presence markers / edit locks don't linger).
 - **Datahike store** (`db`): users + auth tokens (sheet metadata + shares move
   here next; sheet CELL data stays in the file store). Backend is env-driven:
-  H2 file (`data/clorax-h2`) for dev/staging, a full JDBC url
-  (`CLORAX_DB_JDBC_URL`) for YugabyteDB in prod, `:memory` for tests
-  (`CLORAX_DB_BACKEND=mem`). `:keep-history? true` (as-of underpins the planned
+  H2 file (`data/saltrim-h2`) for dev/staging, a full JDBC url
+  (`SALTRIM_DB_JDBC_URL`) for YugabyteDB in prod, `:memory` for tests
+  (`SALTRIM_DB_BACKEND=mem`). `:keep-history? true` (as-of underpins the planned
   audit/branching features). JDBC support is konserve-jdbc directly (forked for
   YugabyteDB) — datahike 0.8 connects konserve stores generically, no
   datahike-jdbc wrapper. konserve caches one c3p0 pool per spec and closes it
@@ -324,17 +324,17 @@ verified manually + via curl (see CLAUDE.md); no web unit tests yet.
 
 ## Build & release
 
-Clorax is a **runnable web app**, not a library — it is **not** published to
+SaltRim is a **runnable web app**, not a library — it is **not** published to
 Clojars. The distributable is a standalone uberjar attached to a GitHub Release.
 
 - `build.clj` (alias `:build`, tools.build) AOT-compiles the gen-class main
-  (`uno.michelada.clorax.web`) and packages `target/clorax-<version>.jar`.
-  Run: `clojure -T:build uber` → `java -jar target/clorax-<version>.jar`
+  (`uno.michelada.saltrim.web`) and packages `target/saltrim-<version>.jar`.
+  Run: `clojure -T:build uber` → `java -jar target/saltrim-<version>.jar`
   (serves on `:8080`). Version comes from `$VERSION`, else `0.1.<git-revs>-dev`.
 - `.github/workflows/release.yml` triggers on a `v*` tag: test → build uberjar
   (VERSION = tag without the `v`) → publish a GitHub Release with the jar.
   Uses the auto `GITHUB_TOKEN`; no Clojars token needed.
-- Coordinate `uno.michelada/clorax`; repo lives under the `michelada-uno` org.
+- Coordinate `uno.michelada/saltrim`; repo lives under the `michelada-uno` org.
 
 To cut a release: `git tag v1.2.3 && git push origin v1.2.3`.
 

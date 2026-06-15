@@ -45,11 +45,11 @@
         :extra-deps {nrepl/nrepl {:mvn/version "1.3.0"}}}
 
   ;; Step 0 spike — prove signal/spin lifecycle on real Spindel.
-  :spike {:main-opts ["-m" "uno.michelada.clorax.spike"]}
-  :spike0b {:main-opts ["-m" "uno.michelada.clorax.spike0b"]}
-  :web {:main-opts ["-m" "uno.michelada.clorax.web"]}
+  :spike {:main-opts ["-m" "uno.michelada.saltrim.spike"]}
+  :spike0b {:main-opts ["-m" "uno.michelada.saltrim.spike0b"]}
+  :web {:main-opts ["-m" "uno.michelada.saltrim.web"]}
 
-  ;; Build a runnable uberjar (java -jar target/clorax-<v>.jar).
+  ;; Build a runnable uberjar (java -jar target/saltrim-<v>.jar).
   :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}}
           :ns-default build}
 

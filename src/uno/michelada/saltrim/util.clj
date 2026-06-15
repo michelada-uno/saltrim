@@ -1,4 +1,4 @@
-(ns uno.michelada.clorax.util
+(ns uno.michelada.saltrim.util
   "Small shared helpers with no project dependencies."
   (:require [clojure.string :as str]))
 

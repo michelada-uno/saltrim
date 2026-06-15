@@ -1,11 +1,11 @@
-(ns uno.michelada.clorax.auth
+(ns uno.michelada.saltrim.auth
   "Identity layer: OAuth 2.0 login (authorization-code flow), auth-token
    cookies, and the persistent user registry.
 
    Providers are data (`provider-defs`); a provider is active when its client
    id/secret env vars are set. When NO real provider is configured the `dev`
    provider activates by default (name-only login, local development) — set
-   CLORAX_DEV_AUTH=1/0 to force it on/off explicitly.
+   SALTRIM_DEV_AUTH=1/0 to force it on/off explicitly.
 
    User ids are `<prefix>-<external-id>` sanitized to [a-z0-9-] — deliberately
    NO underscores, so the `<uid>__<sheet-name>` storage key (see store/web)
@@ -17,19 +17,19 @@
   (:require [clojure.string :as str]
             [org.httpkit.client :as hc]
             [jsonista.core :as json]
-            [uno.michelada.clorax.db :as db]
-            [uno.michelada.clorax.util :as util])
+            [uno.michelada.saltrim.db :as db]
+            [uno.michelada.saltrim.util :as util])
   (:import [java.security SecureRandom MessageDigest]))
 
 ;; --- config ---------------------------------------------------------------
 
 (defn base-url []
-  (or (util/env "CLORAX_BASE_URL") "http://localhost:8080"))
+  (or (util/env "SALTRIM_BASE_URL") "http://localhost:8080"))
 
 (def ^:private provider-defs
   {:github {:label      "GitHub"
-            :id-env     "CLORAX_GITHUB_CLIENT_ID"
-            :secret-env "CLORAX_GITHUB_CLIENT_SECRET"
+            :id-env     "SALTRIM_GITHUB_CLIENT_ID"
+            :secret-env "SALTRIM_GITHUB_CLIENT_SECRET"
             :authorize  "https://github.com/login/oauth/authorize"
             :token      "https://github.com/login/oauth/access_token"
             :userinfo   "https://api.github.com/user"
@@ -40,8 +40,8 @@
                                  :email  (get u "email")
                                  :avatar (get u "avatar_url")})}
    :google {:label      "Google"
-            :id-env     "CLORAX_GOOGLE_CLIENT_ID"
-            :secret-env "CLORAX_GOOGLE_CLIENT_SECRET"
+            :id-env     "SALTRIM_GOOGLE_CLIENT_ID"
+            :secret-env "SALTRIM_GOOGLE_CLIENT_SECRET"
             :authorize  "https://accounts.google.com/o/oauth2/v2/auth"
             :token      "https://oauth2.googleapis.com/token"
             :userinfo   "https://openidconnect.googleapis.com/v1/userinfo"
@@ -64,9 +64,9 @@
 
 (defn dev-auth?
   "Name-only dev login. Defaults to ON when no real provider is configured;
-   CLORAX_DEV_AUTH=1/0 (or true/false) overrides either way."
+   SALTRIM_DEV_AUTH=1/0 (or true/false) overrides either way."
   []
-  (let [v (util/env "CLORAX_DEV_AUTH")]
+  (let [v (util/env "SALTRIM_DEV_AUTH")]
     (cond
       (contains? #{"1" "true" "yes"} v) true
       (contains? #{"0" "false" "no"} v) false
@@ -120,7 +120,7 @@
 
 ;; --- cookies ----------------------------------------------------------------
 
-(def ^:private cookie-name "clorax_auth")
+(def ^:private cookie-name "saltrim_auth")
 (def ^:private COOKIE-MAX-AGE (* 30 24 60 60)) ; 30 days
 
 (defn- secure? [] (str/starts-with? (base-url) "https"))

@@ -1,6 +1,6 @@
-(ns uno.michelada.clorax.addr-test
+(ns uno.michelada.saltrim.addr-test
   (:require [clojure.test :refer [deftest testing is are]]
-            [uno.michelada.clorax.addr :as a]))
+            [uno.michelada.saltrim.addr :as a]))
 
 (deftest col-idx-roundtrip
   (are [col idx] (and (= idx (a/col->idx col)) (= col (a/idx->col idx)))

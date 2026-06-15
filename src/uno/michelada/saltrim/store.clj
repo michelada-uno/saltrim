@@ -1,4 +1,4 @@
-(ns uno.michelada.clorax.store
+(ns uno.michelada.saltrim.store
   "Sheet persistence — saves the SOURCE document (not the Spindel graph), one
    EDN file per sheet id under data/. Behind save!/load, so the backend can
    become Datahike/SQL later without touching callers.
@@ -12,10 +12,10 @@
   (:require [clojure.java.io :as io]
             [clojure.edn :as edn]
             [clojure.string :as str]
-            [uno.michelada.clorax.sheet :as sheet]
-            [uno.michelada.clorax.util :as util]))
+            [uno.michelada.saltrim.sheet :as sheet]
+            [uno.michelada.saltrim.util :as util]))
 
-(def ^:private dir (or (util/env "CLORAX_DATA_DIR") "data"))
+(def ^:private dir (or (util/env "SALTRIM_DATA_DIR") "data"))
 (def ^:private fmt 2)
 
 (defn valid-id?

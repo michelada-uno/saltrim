@@ -1,13 +1,13 @@
-(ns uno.michelada.clorax.db
+(ns uno.michelada.saltrim.db
   "Datahike-backed registry for identity and metadata. Owns users and auth
    tokens now; sheet metadata + shares move here next. Sheet CELL data stays in
    the file store (see `store`).
 
    Backend is env-driven (`config`):
-   - default (dev/staging): H2 file at `data/clorax-h2`
-   - prod: a full JDBC url via CLORAX_DB_JDBC_URL (YugabyteDB — Postgres-wire,
+   - default (dev/staging): H2 file at `data/saltrim-h2`
+   - prod: a full JDBC url via SALTRIM_DB_JDBC_URL (YugabyteDB — Postgres-wire,
      served by the com.yugabyte/jdbc-yugabytedb driver)
-   - tests: in-memory (`CLORAX_DB_BACKEND=mem`, or `init-mem!` directly)
+   - tests: in-memory (`SALTRIM_DB_BACKEND=mem`, or `init-mem!` directly)
 
    We keep history (`:keep-history? true`) deliberately — `as-of` underpins the
    planned audit/branching features. Tokens are stored as a SHA-256 hash of the
@@ -16,7 +16,7 @@
             [datahike.api :as d]
             [konserve-jdbc.core]                      ; registers the konserve :jdbc store
             [konserve.store :refer [validate-store-config]]
-            [uno.michelada.clorax.util :as util]))
+            [uno.michelada.saltrim.util :as util]))
 
 (defn- env [k] (util/env k))
 (defn- now [] (System/currentTimeMillis))
@@ -52,25 +52,25 @@
 
 ;; konserve requires the store :id to be a UUID. For a persistent backend it
 ;; must be STABLE across restarts (else each boot is a fresh empty DB), so we
-;; use a fixed default, overridable via CLORAX_DB_ID.
+;; use a fixed default, overridable via SALTRIM_DB_ID.
 (def ^:private default-id #uuid "c10a4a00-0000-4000-8000-000000000001")
-(defn- store-id [] (if-let [s (env "CLORAX_DB_ID")] (java.util.UUID/fromString s) default-id))
+(defn- store-id [] (if-let [s (env "SALTRIM_DB_ID")] (java.util.UUID/fromString s) default-id))
 
 (defn- config []
   (cond
-    (= "mem" (env "CLORAX_DB_BACKEND"))
+    (= "mem" (env "SALTRIM_DB_BACKEND"))
     {:store {:backend :memory :id (store-id)}
      :schema-flexibility :write :keep-history? true}
 
-    (env "CLORAX_DB_JDBC_URL")
-    {:store {:backend :jdbc :id (store-id) :jdbcUrl (env "CLORAX_DB_JDBC_URL")
-             :table (or (env "CLORAX_DB_TABLE") "clorax")}
+    (env "SALTRIM_DB_JDBC_URL")
+    {:store {:backend :jdbc :id (store-id) :jdbcUrl (env "SALTRIM_DB_JDBC_URL")
+             :table (or (env "SALTRIM_DB_TABLE") "saltrim")}
      :schema-flexibility :write :keep-history? true}
 
     :else
     {:store {:backend :jdbc :id (store-id) :dbtype "h2"
-             :dbname (or (env "CLORAX_DB_PATH") "data/clorax-h2")
-             :table "clorax"}
+             :dbname (or (env "SALTRIM_DB_PATH") "data/saltrim-h2")
+             :table "saltrim"}
      :schema-flexibility :write :keep-history? true}))
 
 (defonce ^:private conn* (atom nil))

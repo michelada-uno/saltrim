@@ -1,4 +1,4 @@
-# Spindel research — branching, SCI, incremental, and what Clorax can use
+# Spindel research — branching, SCI, incremental, and what SaltRim can use
 
 Research pass over the full Spindel docs
 (<https://github.com/replikativ/spindel/blob/main/docs/README.md>, all
@@ -7,7 +7,7 @@ sub-pages) + the `examples/` demos, done 2026-06-14 to inform two decisions:
 1. **Git-like branching of spreadsheets** (sheets + DB data together).
 2. Which Spindel concepts (infinite scroll, SCI, …) are worth adopting.
 
-Clorax context that constrains the answers: we run Spindel **on the JVM for
+SaltRim context that constrains the answers: we run Spindel **on the JVM for
 computation only**, and render the **UI as server HTML over Datastar SSE** — we
 do *not* use Spindel's ClojureScript incremental-DOM layer.
 
@@ -37,11 +37,11 @@ the diff is hand-computed by block id:
 ;; removed blocks counted separately
 ```
 
-**Takeaway for Clorax:** a sheet branch = a branch of the **source document**
+**Takeaway for SaltRim:** a sheet branch = a branch of the **source document**
 (the `{addr {:value …}}` cell map), not a fork of the Spindel execution
 context. Diff/merge are cell-level operations we own (3-way by address, exactly
 like `classify-blocks` by id). Spindel just rebuilds its reactive graph from
-whatever branch's source is loaded — **which Clorax already does on every sheet
+whatever branch's source is loaded — **which SaltRim already does on every sheet
 load** (`store/load-sheet` → replay `set-cell!`). So branching is a **storage /
 data-model concern**, and it maps straight onto Datahike.
 
@@ -77,7 +77,7 @@ lineage (`get-fork-lineage`, `fork-depth`), lifecycle (`stop-context!`,
 2. **Continuations are not serializable.** A serialized context is restored by
    **re-executing the model fn** (`with-rebuild-context`: spin bodies run but
    return cached values, rebuilding the dependency graph). This is the *same
-   pattern Clorax already uses* — persist source, rebuild graph on load — so
+   pattern SaltRim already uses* — persist source, rebuild graph on load — so
    serialize-context buys us little over our own EDN/Datahike source store.
 
 Spin cache identity is **keyed by source location** (deterministic hash chain),
@@ -115,7 +115,7 @@ Cost: **~7× interpretation overhead** vs native (boundary crossing itself
 ~10ns). Formulas aren't individually hot and recompute is incremental, so this
 is likely acceptable.
 
-**Candidate (not now):** replace Clorax's `eval` + symbol-whitelist formula
+**Candidate (not now):** replace SaltRim's `eval` + symbol-whitelist formula
 sandbox with the SCI macro context. Upside: a real sandbox (no `eval`, no RCE
 surface), explicit native-spin allowlist instead of a symbol blocklist. This is
 a formula-engine change, orthogonal to auth/DB — worth its own spike + PR.
@@ -138,7 +138,7 @@ O(delta) DOM ops. Window math is identical to ours:
 
 **Honest verdict:** `islice` + `ifor-each` and the delta vocabulary
 (`{:degree :grow :shrink :permutation :change :freeze}`) live in Spindel's
-**ClojureScript incremental-DOM** layer. Clorax renders **server HTML over
+**ClojureScript incremental-DOM** layer. SaltRim renders **server HTML over
 Datastar**, so we can't drop `islice` into our client. It's strong *validation*
 that our logical-scroll windowing is the right shape, not reusable code —
 **unless** we ever move cell rendering to Spindel's cljs DOM (we deliberately
@@ -153,16 +153,16 @@ dependents; only worth it if patch size becomes a problem.
 These are engine-level (JVM-capable), independent of the cljs DOM:
 
 - **`batch`** (`concepts`/`getting-started`): group several `swap!`s into **one
-  propagation pass**. Clorax fit: bulk source load (`load-document!`), applying
+  propagation pass**. SaltRim fit: bulk source load (`load-document!`), applying
   a set of dependent recomputes, or future multi-cell paste — one drain instead
   of N.
 - **Rate control** (`combinators.md`): `debounce`, `throttle`, `sample`,
-  `relieve`. Clorax fit: presence chattiness (debounce `/presence`), autosave
+  `relieve`. SaltRim fit: presence chattiness (debounce `/presence`), autosave
   cadence (`sample`/`throttle` the file write), cursor pushes. All server-side.
 - **`parallel` / `race` / `timeout`**: concurrent OAuth token+userinfo calls
   with a deadline (the auth layer currently does them sequentially).
 - **Pub/Sub** (`pubsub.md`): `Mult` fan-out + `Pub` topic routing with
-  backpressure and sliding/dropping buffers. Clorax fit: our hand-rolled
+  backpressure and sliding/dropping buffers. SaltRim fit: our hand-rolled
   per-sheet broadcast-to-sessions is exactly a Mult; a per-sheet topic could
   replace the manual `doseq` over `sessions*` and give backpressure for slow
   SSE clients. Bigger refactor — note for later.
@@ -174,7 +174,7 @@ These are engine-level (JVM-capable), independent of the cljs DOM:
 
 ## 5. Per-page index (full coverage)
 
-| page | gist | Clorax relevance |
+| page | gist | SaltRim relevance |
 |------|------|------------------|
 | `concepts.md` | spins = bodies of checkpoints; signals; effects; drain queue; caching; exec context; `batch` | core mental model; `batch` usable now |
 | `getting-started.md` | minimal setup, common mistakes (`@` vs `track`/`await`), batching | confirms our gotchas |
