@@ -20,6 +20,7 @@
             [uno.michelada.saltrim.addr :as addr]
             [uno.michelada.saltrim.auth :as auth]
             [uno.michelada.saltrim.db :as db]
+            [uno.michelada.saltrim.fmt :as fmt]
             [uno.michelada.saltrim.sheet :as sheet]
             [uno.michelada.saltrim.store :as store]
             [starfederation.datastar.clojure.api :as d*]
@@ -62,6 +63,24 @@
   (let [[cb rb] (view-base {:r0 r0 :c0 c0})]
     [(range cb (min MAX-COLS (+ cb WIN-COLS)))
      (range rb (min MAX-ROWS (+ rb WIN-ROWS)))]))
+
+;; Axis sizing: columns/rows default to CW/RH but carry sparse per-index px
+;; overrides (sheet :cols/:rows). Absolute offset of an index = uniform base
+;; plus the (override-base) deltas of every sized index BEFORE it. The same
+;; arithmetic runs in /app.js (from the maps in #meta) so client + server agree.
+
+(defn- col-w [sh ci] (or (sheet/col-width sh ci) CW))
+(defn- row-h [sh ri] (or (sheet/row-height sh ri) RH))
+
+(defn- axis-off
+  "Absolute start px of `i` along an axis whose default size is `base` and whose
+   sparse overrides are `om` (index -> size)."
+  [om base i]
+  (reduce-kv (fn [acc k v] (cond-> acc (< (long k) (long i)) (+ (- (long v) base))))
+             (* (long i) base) om))
+
+(defn- axis-x [sh ci] (axis-off (sheet/col-widths sh) CW ci))
+(defn- axis-y [sh ri] (axis-off (sheet/row-heights sh) RH ri))
 
 ;; --- state --------------------------------------------------------------
 
@@ -221,7 +240,9 @@
   (let [[cm rm] (used-max sh)
         cols (min MAX-COLS (+ (max MIN-COLS (inc cm) (+ (long c0) WIN-COLS)) BUF-COLS))
         rows (min MAX-ROWS (+ (max MIN-ROWS (inc rm) (+ (long r0) WIN-ROWS)) BUF-ROWS))]
-    [(* cols CW) (* rows RH)]))
+    ;; total extent = absolute offset of the index just past the buffered range
+    ;; (folds in any sparse width/height overrides)
+    [(axis-x sh cols) (axis-y sh rows)]))
 
 (defn- in-window? [{:keys [r0 c0]} addr]
   (let [{:keys [ci ri]} (addr/parse addr)]
@@ -231,10 +252,42 @@
 ;; --- rendering ----------------------------------------------------------
 
 (defn- display [sh a]
-  (let [v (sheet/value sh a)]
-    (cond (nil? v) "" (map? v) "#ERR" :else (str v))))
+  (let [v    (sheet/value sh a)
+        mask (sheet/style-value sh a :format)]   ; nil / string / {:error}
+    (cond (nil? v) ""
+          (map? v) "#ERR"
+          (string? mask) (fmt/apply-mask mask v)
+          :else (str v))))
 
 (defn- cell-id [a] (str "c_" a))
+
+(def style-css
+  "Reactive style prop -> CSS declaration. The whole supported set lives here;
+   adding a property is one entry (+ a control in the style panel). Each value is
+   a literal or an =-formula computed per cell into a CSS string."
+  (array-map :bg     "background-color"
+             :fg     "color"
+             :weight "font-weight"
+             :slant  "font-style"
+             :align  "text-align"))
+
+(def value-props
+  "Presentational props consumed by transforming the displayed VALUE (not CSS).
+   :format is a number mask (see the fmt ns). Same reactive literal-or-=formula
+   model as style props — just applied in `display` instead of as a CSS decl."
+  [:format])
+
+(defn- prop-allowed? [p]
+  (or (contains? style-css p) (some #{p} value-props)))
+
+(defn- cell-style-decls
+  "Inline CSS for `a`'s style props (only those resolving to a string; errors /
+   blanks are skipped here and reported via the toast)."
+  [sh a]
+  (apply str (keep (fn [[prop css]]
+                     (let [v (sheet/style-value sh a prop)]
+                       (when (string? v) (str ";" css ":" v))))
+                   style-css)))
 
 (defn- cell-input
   "Minimal per-cell HTML: a DISPLAY div (not an input), positioned WINDOW-RELATIVE
@@ -243,34 +296,44 @@
    per-cell input -> no 500 live <input>s."
   [sh a ci ri cbase rbase]
   (let [disp (display sh a)
-        raw  (or (sheet/raw sh a) disp)]
+        raw  (or (sheet/raw sh a) disp)
+        w    (sheet/col-width sh ci)
+        h    (sheet/row-height sh ri)]
     [:div {:id (cell-id a) :class "cell" :data-raw raw
-           :style (format "left:%dpx;top:%dpx" (* (- ci cbase) CW) (* (- ri rbase) RH))}
+           :style (str (format "left:%dpx;top:%dpx"
+                               (- (axis-x sh ci) (axis-x sh cbase))
+                               (- (axis-y sh ri) (axis-y sh rbase)))
+                       (when w (format ";width:%dpx" (dec w)))
+                       (when h (format ";height:%dpx" (dec h)))
+                       (cell-style-decls sh a))}
      disp]))
 
 (defn- cells-html [sh cis ris]
   (let [cb (first cis) rb (first ris)]
     (str (h/html (for [ri ris ci cis] (cell-input sh (addr/make ci ri) ci ri cb rb))))))
 
-(defn- colhead-html [cis]
-  (let [cb (first cis)]
+(defn- colhead-html [sh cis]
+  (let [xb (axis-x sh (first cis))]
     (str (h/html
-          (for [ci cis]
+          (for [ci cis :let [w (col-w sh ci)]]
             [:div {:style (format (str "position:absolute;left:%dpx;top:0;width:%dpx;height:%dpx;"
                                        "line-height:%dpx;text-align:center;background:#f3f3f3;"
                                        "border:1px solid #e0e0e0;font:12px sans-serif;box-sizing:border-box;")
-                                  (* (- ci cb) CW) CW HDR HDR)}
-             (addr/idx->col ci)])))))
+                                  (- (axis-x sh ci) xb) w HDR HDR)}
+             (addr/idx->col ci)
+             ;; drag handle on the right edge -> resize this column (/app.js)
+             [:div {:class "colgrip" :data-ci ci}]])))))
 
-(defn- rowhead-html [ris]
-  (let [rb (first ris)]
+(defn- rowhead-html [sh ris]
+  (let [yb (axis-y sh (first ris))]
     (str (h/html
-          (for [ri ris]
+          (for [ri ris :let [h (row-h sh ri)]]
             [:div {:style (format (str "position:absolute;left:0;top:%dpx;width:%dpx;height:%dpx;"
                                        "line-height:%dpx;text-align:center;background:#f3f3f3;"
                                        "border:1px solid #e0e0e0;font:12px sans-serif;box-sizing:border-box;")
-                                  (* (- ri rb) RH) GUT RH RH)}
-             (inc ri)])))))
+                                  (- (axis-y sh ri) yb) GUT h h)}
+             (inc ri)
+             [:div {:class "rowgrip" :data-ri ri}]])))))
 
 (defn- meta-html
   "Hidden element carrying, to /app.js: the logical scroll totals (size the
@@ -281,6 +344,9 @@
   (let [[tw th] (total-px sh r0 c0)
         [cb rb] (view-base {:r0 r0 :c0 c0})]
     (str (h/html [:div {:id "meta" :data-tw tw :data-th th :data-cb cb :data-rb rb
+                        ;; sparse axis-size overrides so /app.js computes offsets
+                        :data-colw (json/write-value-as-string (sheet/col-widths sh))
+                        :data-rowh (json/write-value-as-string (sheet/row-heights sh))
                         :style "display:none;"}]))))
 
 (defn- grid-layers
@@ -316,12 +382,12 @@
       [:div {:id "colclip" :style (format "%sleft:%dpx;top:0;right:%dpx;height:%dpx;z-index:3;"
                                           clip GUT BAR HDR)}
        [:div {:id "colstrip" :style "position:absolute;left:0;top:0;will-change:transform;"}
-        [:div {:id "colhead"} (h/raw (colhead-html cis))]]]
+        [:div {:id "colhead"} (h/raw (colhead-html sh cis))]]]
       ;; row header strip (clipped; translated in Y)
       [:div {:id "rowclip" :style (format "%sleft:0;top:%dpx;bottom:%dpx;width:%dpx;z-index:3;"
                                           clip HDR BAR GUT)}
        [:div {:id "rowstrip" :style "position:absolute;left:0;top:0;will-change:transform;"}
-        [:div {:id "rowhead"} (h/raw (rowhead-html ris))]]]
+        [:div {:id "rowhead"} (h/raw (rowhead-html sh ris))]]]
       ;; cell area (clipped; translated in X+Y)
       [:div {:id "cellclip" :style (format "%sleft:%dpx;top:%dpx;right:%dpx;bottom:%dpx;"
                                            clip GUT HDR BAR BAR)}
@@ -349,9 +415,64 @@
        [:div {:id "vthumb" :style "position:absolute;left:1px;right:1px;top:0;height:30px;background:#bbb;border-radius:6px;"}]]
       [:div {:id "hbar" :style (format (str "position:absolute;left:%dpx;bottom:0;right:%dpx;height:%dpx;"
                                             "background:#f0f0f0;z-index:5;") GUT BAR BAR)}
-       [:div {:id "hthumb" :style "position:absolute;top:1px;bottom:1px;left:0;width:30px;background:#bbb;border-radius:6px;"}]]])))
+       [:div {:id "hthumb" :style "position:absolute;top:1px;bottom:1px;left:0;width:30px;background:#bbb;border-radius:6px;"}]]
+      ;; single moving guide line shown while dragging a header grip
+      [:div {:id "rzguide"}]])))
 
 (declare share-html)
+
+(defn- help-html
+  "In-app end-user reference, toggled by $help. Mirrors README's user guide.
+   Pure server-rendered HTML shown/hidden by Datastar data-show — no app.js."
+  []
+  (let [h3  "margin:.8rem 0 .25rem;font:600 13px sans-serif;"
+        p   "margin:.2rem 0;font:13px sans-serif;color:var(--fg);"
+        kbd "font:12px monospace;background:var(--panel);border:1px solid var(--grid);border-radius:3px;padding:0 4px;"]
+    (str (h/html
+          [:div {:id "helpwrap" :data-show "$help"
+                 :data-on:click "$help=false"
+                 :style (str "position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.35);"
+                             "display:flex;align-items:flex-start;justify-content:center;padding:4vh 1rem;")}
+           [:div {:data-on:click "evt.stopPropagation()"
+                  :style (str "background:var(--bg);border:1px solid var(--line);border-radius:8px;"
+                              "box-shadow:0 8px 32px rgba(0,0,0,.25);max-width:38rem;width:100%;"
+                              "max-height:88vh;overflow:auto;padding:1.1rem 1.3rem;")}
+            [:div {:style "display:flex;align-items:center;margin-bottom:.3rem;"}
+             [:h2 {:style "margin:0;font:600 18px sans-serif;flex:1;"} "SaltRim — quick guide"]
+             [:button {:class "btn" :data-on:click "$help=false" :title "close"} "✕"]]
+
+            [:div {:style h3} "Cells & formulas"]
+            [:p {:style p} "Type a value, or start with " [:span {:style kbd} "="]
+             " for a formula (Clojure s-expressions). Reference cells with "
+             [:span {:style kbd} "#cell A1"] " and ranges with " [:span {:style kbd} "#cells A1:A3"] "."]
+            [:p {:style p} "e.g. " [:span {:style kbd} "=(+ #cell A1 #cell B1)"] " · "
+             [:span {:style kbd} "=(reduce + #cells A1:A3)"]]
+
+            [:div {:style h3} "Styling a cell"]
+            [:p {:style p} "Use the third toolbar row: pick a property, type a value or an "
+             [:span {:style kbd} "="] "-formula, press Apply (or Enter). "
+             [:span {:style kbd} "$val"] " is the selected cell's own value, so styles can react to it."]
+            [:p {:style p} "Properties: " [:span {:style kbd} "bg"] " (background), "
+             [:span {:style kbd} "fg"] " (text color), " [:span {:style kbd} "weight"] " (e.g. bold), "
+             [:span {:style kbd} "slant"] " (e.g. italic), " [:span {:style kbd} "align"] " (left/right/center)."]
+            [:p {:style p} "e.g. bg " [:span {:style kbd} "=(if (> $val 100) \"tomato\" \"white\")"]]
+
+            [:div {:style h3} "Number format"]
+            [:p {:style p} "Property " [:span {:style kbd} "format"] " takes a mask applied to numeric values: "
+             [:span {:style kbd} "0.00"] " → 1234.50 · " [:span {:style kbd} "#,##0"] " → 1,234,567 · "
+             [:span {:style kbd} "0.0%"] " → 25.0% · " [:span {:style kbd} "$#,##0.00"] " → $1,234.50"]
+
+            [:div {:style h3} "Column & row size"]
+            [:p {:style p} "Drag the trailing edge of a column header (or the bottom edge of a row "
+             "number) to resize it. Sizes are saved with the sheet."]
+
+            [:div {:style h3} "Navigation"]
+            [:p {:style p} "Click to select · double-click or " [:span {:style kbd} "Enter"]
+             " to edit · arrows / " [:span {:style kbd} "Tab"] " to move · the address box jumps to a cell."]
+
+            [:div {:style h3} "Sharing"]
+            [:p {:style p} "The link / lock button (top bar, owner only) shares the sheet by capability "
+             "link or with specific people, at view or edit level."]]]))))
 
 (defn- sheet-picker
   "Dropdown for switching sheets, grouped into 'your sheets' (👤) and 'shared
@@ -409,6 +530,14 @@
                 ".btn{font:12px sans-serif;padding:5px 8px;border:1px solid var(--line);"
                 "border-radius:var(--radius);background:var(--panel);cursor:pointer;}"
                 ".spacer{flex:1;}"
+                ;; resize grips: a thin hit-zone on a header's trailing edge that
+                ;; /app.js drags. The #rzguide is the single moving guide line.
+                ".colgrip{position:absolute;top:0;right:-3px;width:6px;height:100%;"
+                "cursor:col-resize;z-index:5;}"
+                ".rowgrip{position:absolute;left:0;bottom:-3px;height:6px;width:100%;"
+                "cursor:row-resize;z-index:5;}"
+                "#rzguide{position:absolute;display:none;background:var(--accent);"
+                "z-index:7;pointer-events:none;}"
                 (format (str ".cell{position:absolute;width:%dpx;height:%dpx;"
                              "box-sizing:border-box;border:1px solid var(--grid);"
                              "padding:2px 4px;font:13px monospace;overflow:hidden;"
@@ -447,7 +576,9 @@
       [:script {:src "/app.js"}]]
      [:body {:data-signals (format (str "{cell:'', v:'', err:'', sel:'', edit:false, r0:0, c0:0, "
                                         "sheet:'%s', sid:'', link:'%s', sharepanel:false, shareact:'', "
-                                        "plevel:'', gtarget:'', glevel:'read-write', grantee:''}")
+                                        "plevel:'', gtarget:'', glevel:'read-write', grantee:'', "
+                                        "styleprop:'bg', stylesrc:'', rzaxis:'', rzidx:0, rzsize:0, "
+                                        "help:false}")
                                    storage-id (or link-token ""))
              :style "font-family:sans-serif;margin:0;padding:.6rem;"}
       ;; hidden input carrying the session id into $sid, and a hidden trigger
@@ -462,6 +593,7 @@
              :style (str "position:fixed;top:1rem;right:1rem;max-width:26rem;background:#c0392b;"
                          "color:#fff;padding:.6rem .9rem;border-radius:6px;font:13px sans-serif;"
                          "cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.3);z-index:20;")}]
+      (h/raw (help-html))
       ;; ── toolbar row 1: sheet management + sharing + identity ───────────
       [:div {:class "toolrow"}
        (sheet-picker uid storage-id sname)
@@ -472,6 +604,7 @@
        ;; sharing toggle / badge (patched back by POST /share)
        (h/raw (share-html uid storage-id link-token))
        [:span {:class "spacer"}]
+       [:button {:class "btn" :data-on:click "$help=true" :title "help / quick guide"} "?"]
        ;; who am I + sign out
        [:span {:style "font:12px sans-serif;color:var(--muted);white-space:nowrap;"}
         (or (:name (auth/user-info uid)) uid)]
@@ -491,6 +624,20 @@
                 :data-on:keydown "evt.key==='Enter' && ($cell=$sel, @post('/cell'))"
                 :data-on:blur "$cell=$sel, @post('/cell'), $edit=false, @post('/presence')"
                 :style "flex:1;"}]]
+      ;; ── toolbar row 3: style of the selected cell ──────────────────────
+      ;; prop dropdown + a literal-or-=formula source, applied to $sel via
+      ;; POST /style. $val is the cell's own value, e.g.
+      ;;   =(if (> $val 100) "tomato" "white")
+      [:div {:class "toolrow"}
+       [:select {:id "stylepropbox" :class "tool" :data-bind:styleprop ""
+                 :title "style / format property of the selected cell"}
+        (for [p (concat (keys style-css) value-props)] [:option {:value (name p)} (name p)])]
+       [:input {:id "stylesrcbox" :class "tool mono" :data-bind:stylesrc ""
+                :placeholder "color / mask / =formula (use $val)"
+                :data-on:keydown "evt.key==='Enter' && ($cell=$sel, @post('/style'))"
+                :style "flex:1;"}]
+       [:button {:class "btn" :data-on:click "$cell=$sel, @post('/style')"
+                 :title "apply style to the selected cell"} "apply"]]
       ;; hidden r0/c0 carriers (/app.js sets these then clicks #viewtrigger so
       ;; Datastar @post /view and applies the returned window patch).
       [:input {:id "r0box" :data-bind:r0 "" :style "display:none;"}]
@@ -505,6 +652,13 @@
                 :style "display:none;"} ""]
       [:button {:id "celltrigger" :data-on:click "$cell=$sel, @post('/cell')"
                 :style "display:none;"} ""]
+      ;; column/row resize: /app.js fills these from a header grip drag, then
+      ;; clicks #sizetrigger to POST /size. (rzidx/rzsize seeded numeric so
+      ;; Datastar keeps them numbers, not strings.)
+      [:input {:id "rzaxisbox" :data-bind:rzaxis "" :style "display:none;"}]
+      [:input {:id "rzidxbox"  :data-bind:rzidx ""  :style "display:none;"}]
+      [:input {:id "rzsizebox" :data-bind:rzsize "" :style "display:none;"}]
+      [:button {:id "sizetrigger" :data-on:click "@post('/size')" :style "display:none;"} ""]
       ;; logical-scroll viewport (custom wheel + scrollbars in /app.js)
       (grid-layers sh {:r0 0 :c0 0})]])))
 
@@ -581,7 +735,7 @@
 (defn- peer-marker
   "Overlay div for one peer's cursor, positioned window-relative to `view`. An
    editing peer's marker captures pointer events (locks the cell beneath)."
-  [view {:keys [cursor editing color uname]}]
+  [sh view {:keys [cursor editing color uname]}]
   (let [{:keys [ci ri]} (addr/parse cursor)
         [cb rb] (view-base view)
         editing? (= editing cursor)
@@ -590,9 +744,10 @@
         ;; rendered row that's clipped by #cellclip's overflow, so flip it below.
         top-row? (zero? (- ri rb))
         tag-style (str "background:" color
-                       (when top-row? (str ";top:" (dec RH) "px;border-radius:0 3px 3px 3px")))
+                       (when top-row? (str ";top:" (dec (row-h sh ri)) "px;border-radius:0 3px 3px 3px")))
         base (format (str "left:%dpx;top:%dpx;width:%dpx;height:%dpx;border-color:%s;")
-                     (* (- ci cb) CW) (* (- ri rb) RH) (dec CW) (dec RH) color)]
+                     (- (axis-x sh ci) (axis-x sh cb)) (- (axis-y sh ri) (axis-y sh rb))
+                     (dec (col-w sh ci)) (dec (row-h sh ri)) color)]
     (str (h/html
           [:div {:class (str "peer" (when editing? " editing"))
                  :style (if editing?
@@ -606,12 +761,13 @@
   "Overlay markers for every OTHER session whose cursor falls in viewer-sid's
    window. Rendered relative to the viewer's own view so coords line up."
   [viewer-sid sheet-id]
-  (let [view (session-view viewer-sid)]
+  (let [view (session-view viewer-sid)
+        sh   (:sh (@sheets* sheet-id))]
     (apply str
            (for [[sid s] @sessions*
                  :when (and (not= sid viewer-sid) (= sheet-id (:sheet s))
                             (:cursor s) (in-window? view (:cursor s)))]
-             (peer-marker view s)))))
+             (peer-marker sh view s)))))
 
 (defn- self-html
   "THIS session's own selection / editing marker for its #self overlay, rendered
@@ -620,14 +776,16 @@
   [sid sheet-id]
   (let [s    (@sessions* sid)
         view (session-view sid)
-        a    (:cursor s)]
-    (if (and s (= sheet-id (:sheet s)) a (in-window? view a))
+        a    (:cursor s)
+        sh   (:sh (@sheets* sheet-id))]
+    (if (and s sh (= sheet-id (:sheet s)) a (in-window? view a))
       (let [{:keys [ci ri]} (addr/parse a)
             [cb rb] (view-base view)]
         (str (h/html
               [:div {:class (str "selfcell" (when (= (:editing s) a) " editing"))
                      :style (format "left:%dpx;top:%dpx;width:%dpx;height:%dpx;"
-                                    (* (- ci cb) CW) (* (- ri rb) RH) (dec CW) (dec RH))}])))
+                                    (- (axis-x sh ci) (axis-x sh cb)) (- (axis-y sh ri) (axis-y sh rb))
+                                    (dec (col-w sh ci)) (dec (row-h sh ri)))}])))
       "")))
 
 (defn- broadcast-presence!
@@ -637,6 +795,28 @@
   (doseq [[sid s] @sessions*]
     (when (and (= sheet-id (:sheet s)) (:gen s))
       (try (d*/lock-sse! (:gen s) (patch-inner! (:gen s) "#peers" (peers-html sid sheet-id)))
+           (catch Throwable _ (reap-session! sid))))))
+
+(defn- render-window!
+  "Push the full visible window for `view` to `gen`: cells, both header strips,
+   the #meta totals, and this session's own overlays. Used after a scroll (/view)
+   and after an axis resize (/size), where every position in the window shifts."
+  [gen sid sheet-id sh view]
+  (let [[cis ris] (window (:r0 view) (:c0 view))]
+    (patch-inner! gen "#cells"   (cells-html sh cis ris))
+    (patch-inner! gen "#colhead" (colhead-html sh cis))
+    (patch-inner! gen "#rowhead" (rowhead-html sh ris))
+    (d*/patch-elements! gen (meta-html sh (:r0 view) (:c0 view)))   ; #meta by id
+    (patch-inner! gen "#self"  (self-html sid sheet-id))
+    (patch-inner! gen "#peers" (peers-html sid sheet-id))))
+
+(defn- broadcast-window!
+  "A resize shifts every position, so re-render each OTHER session's whole window
+   on its own stream (scoped to that session's view)."
+  [editor-sid sheet-id sh]
+  (doseq [[sid s] @sessions*]
+    (when (and (not= sid editor-sid) (= sheet-id (:sheet s)) (:gen s))
+      (try (d*/lock-sse! (:gen s) (render-window! (:gen s) sid sheet-id sh (:view s)))
            (catch Throwable _ (reap-session! sid))))))
 
 (defn- locked-by-other?
@@ -706,14 +886,32 @@
       {:status 403 :body "no access"}
       (f uid sid sheet-id token))))
 
+(defn- push-changes!
+  "Render `affected` cells back to the editor (one-shot SSE), toast any value /
+   style errors, and broadcast the same cells to collaborators. Shared by /cell
+   and /style — both just compute an affected set and hand it here."
+  [gen sid sheet-id sh affected]
+  (let [affected (sort (distinct affected))
+        view     (session-view sid)
+        visible  (filter #(in-window? view %) affected)
+        errs (concat
+              (keep (fn [a] (when-let [e (:error (sheet/value sh a))]
+                              (str a ": " (pretty-err e))))
+                    affected)
+              (for [a affected [prop e] (sheet/style-errors sh a)]
+                (str a " " (name prop) " style: " (pretty-err e))))]
+    (when (seq visible)
+      (d*/patch-elements! gen (render-cells sh visible view)))
+    (signals! gen {:err (if (seq errs) (str/join "; " errs) "")})
+    (broadcast! sid sheet-id sh affected)))
+
 (defn- handle-cell [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [cell v sid]} gen]
       (ensure-session! sid sheet-id uid (:token rec))   ; lazy re-register + keep alive
       (if (not= :read-write (:level rec))
         (signals! gen {:err "read-only access — you can't edit this sheet"})
-        (let [sh   (:sh rec)
-              view (session-view sid)]
+        (let [sh (:sh rec)]
           (when (addr/valid? cell)
             (locking edit-lock
             (try
@@ -722,20 +920,38 @@
               (sheet/set-cell! sh cell (str v))
               (sheet/settle! sh)
               (save-rec! sheet-id)              ; autosave (source + meta)
-              (let [affected (cons cell (sort (sheet/dependents* sh cell)))
-                    visible  (filter #(in-window? view %) affected)   ; on-screen for THIS session
-                    errs (keep (fn [a]
-                                 (when-let [e (:error (sheet/value sh a))]
-                                   (str a ": " (pretty-err e))))
-                               affected)]
-                ;; editor: immediate feedback on this one-shot response
-                (when (seq visible)
-                  (d*/patch-elements! gen (render-cells sh visible view)))
-                (signals! gen {:err (if (seq errs) (str/join "; " errs) "")})
-                ;; collaborators: push the same change to their streams
-                (broadcast! sid sheet-id sh affected))
+              (push-changes! gen sid sheet-id sh
+                             (cons cell (into (sheet/dependents* sh cell)
+                                              (sheet/style-dependents sh cell))))
               (catch Throwable e
                 (signals! gen {:err (str cell ": " (pretty-err (.getMessage e)))}))))))))))
+
+(defn- handle-style [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [cell sid] :as sig} gen]
+      (ensure-session! sid sheet-id uid (:token rec))
+      (let [sh   (:sh rec)
+            prop (keyword (:styleprop sig))
+            src  (str (:stylesrc sig))]
+        (cond
+          (not= :read-write (:level rec))
+          (signals! gen {:err "read-only access — you can't edit this sheet"})
+          (not (prop-allowed? prop))
+          (signals! gen {:err (str "unknown style property: " (:styleprop sig))})
+          (not (addr/valid? cell))
+          (signals! gen {:err "select a cell first"})
+          :else
+          (locking edit-lock
+            (try
+              (sheet/set-style! sh cell prop src)
+              (sheet/settle! sh)
+              (save-rec! sheet-id)
+              ;; only the styled cell re-renders now; style refs to OTHER cells
+              ;; just register the edge for future value changes.
+              (push-changes! gen sid sheet-id sh [cell])
+              (catch Throwable e
+                (signals! gen {:err (str cell " " (name prop) " style: "
+                                         (pretty-err (.getMessage e)))})))))))))
 
 (defn- handle-view [req]
   (with-access req
@@ -747,14 +963,29 @@
         ;; logical scroll: always cheap inner patches. The window is positioned
         ;; relative to (c0,r0); /app.js translates + sizes the scrollbars from
         ;; #meta totals (no giant spacer to resize).
-        (let [[cis ris] (window (:r0 view) (:c0 view))]
-          (patch-inner! gen "#cells"   (cells-html sh cis ris))
-          (patch-inner! gen "#colhead" (colhead-html cis))
-          (patch-inner! gen "#rowhead" (rowhead-html ris))
-          (d*/patch-elements! gen (meta-html sh (:r0 view) (:c0 view)))   ; #meta by id
-          ;; re-render this session's own marker + peer cursors for the new window
-          (patch-inner! gen "#self"  (self-html sid sheet-id))
-          (patch-inner! gen "#peers" (peers-html sid sheet-id)))))))
+        (render-window! gen sid sheet-id sh view)))))
+
+(defn- handle-size [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [sid rzaxis rzidx rzsize]} gen]
+      (ensure-session! sid sheet-id uid (:token rec))
+      (let [sh (:sh rec)]
+        (if (not= :read-write (:level rec))
+          (signals! gen {:err "read-only access — you can't edit this sheet"})
+          (locking edit-lock
+            (try
+              (let [i (long rzidx)
+                    s (when rzsize (long rzsize))]    ; nil/0 -> reset to default
+                (case (str rzaxis)
+                  "col" (sheet/set-col-width!  sh i s)
+                  "row" (sheet/set-row-height! sh i s)
+                  (throw (ex-info "bad axis" {:axis rzaxis})))
+                (save-rec! sheet-id)
+                ;; positions across the whole window shift -> full re-render
+                (render-window! gen sid sheet-id sh (session-view sid))
+                (broadcast-window! sid sheet-id sh))
+              (catch Throwable e
+                (signals! gen {:err (pretty-err (.getMessage e))})))))))))
 
 (defn- body-json [req]
   (when-let [b (:body req)]
@@ -1076,6 +1307,8 @@
                                                       :view (:view s)})
                                                    @sessions*)})})
     [:post "/cell"]       (handle-cell req)
+    [:post "/style"]      (handle-style req)
+    [:post "/size"]       (handle-size req)
     [:post "/view"]       (handle-view req)
     [:post "/presence"]   (handle-presence req)
     [:post "/share"]      (handle-share req)

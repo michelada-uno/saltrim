@@ -52,10 +52,21 @@
     @acc))
 
 (defn parse
-  "Formula string (without leading =) -> {:form :deps}."
-  [s]
-  (let [form (edn/read-string {:readers readers} s)]
-    {:form form :deps (deps form)}))
+  "Formula string (without leading =) -> {:form :deps}.
+
+   With `self` (the owner address, e.g. for a STYLE/FORMAT property), the bare
+   symbol `$val` rewrites to a ref on the owner's own value — sugar for
+   `#cell <self>`. So a style reads the cell's current value reactively (an
+   `await` edge) without retyping the address. `$val` is only meaningful where
+   an owner exists; in a plain value formula it stays an unknown symbol and
+   `validate!` rejects it."
+  ([s] (parse s nil))
+  ([s self]
+   (let [form0 (edn/read-string {:readers readers} s)
+         form  (if self
+                 (walk/postwalk #(if (= '$val %) (ref-marker self) %) form0)
+                 form0)]
+     {:form form :deps (deps form)})))
 
 ;; --- validate (whitelist sandbox) --------------------------------------
 

@@ -21,9 +21,13 @@
   (let [registry (atom {})
         vals     (atom {})
         meta     (atom {})
+        styles   (atom {})
+        cols     (atom {})        ; ci -> width-px  (sparse; default elsewhere)
+        rows     (atom {})        ; ri -> height-px (sparse)
         rt       (ctx/create-execution-context
                   {:metadata {:registry registry :vals vals}})]
-    {:rt rt :registry registry :vals vals :meta meta}))
+    {:rt rt :registry registry :vals vals :meta meta :styles styles
+     :cols cols :rows rows}))
 
 (defn- classify [raw]
   (let [t (some-> raw str/trim)]
@@ -147,20 +151,128 @@
 (defn kind  [{:keys [meta]} addr] (get-in @meta [addr :kind]))
 (defn cells [{:keys [meta]}] (keys @meta))
 
+;; --- style layer --------------------------------------------------------
+;;
+;; A SEPARATE registry of presentational properties (e.g. :bg) per cell. Each
+;; property is a literal string OR an `=`-formula compiled into its own Spin.
+;; Style spins only READ the value layer (via `$val`/`#cell`) — never the
+;; reverse — so they can't form a cycle with value formulas, and the value
+;; layer's cycle detection / rebuild logic stays untouched. Style state is
+;; {addr -> {prop -> {:raw :kind :deps :spin}}}.
+
+(defn- compile-style
+  "Build a style entry for raw source, or nil if blank. `=`-formulas compile to
+   a Spin (with `$val` bound to the owner's value); literals store the string."
+  [{:keys [rt]} addr raw]
+  (let [t (some-> raw str/trim)]
+    (cond
+      (or (nil? t) (= "" t)) nil
+      (str/starts-with? t "=")
+      (binding [ec/*execution-context* rt]
+        (let [{:keys [form deps]} (formula/parse (subs t 1) addr)]
+          {:raw raw :kind :formula :deps deps :spin (formula/compile form)}))
+      :else {:raw raw :kind :literal :deps #{} :spin nil})))
+
+(defn set-style!
+  "Set style PROP (keyword, e.g. :bg) of `addr` from raw source. Blank removes
+   it. Returns the sheet."
+  [{:keys [rt styles] :as sheet} addr prop raw]
+  (binding [ec/*execution-context* rt]
+    (when-let [old (get-in @styles [addr prop])]
+      (when-let [sp (:spin old)] (spin-core/cleanup-spin! sp)))
+    (if-let [e (compile-style sheet addr raw)]
+      (swap! styles assoc-in [addr prop] e)
+      (swap! styles update addr dissoc prop)))
+  sheet)
+
+(defn style-value
+  "Computed value of style PROP of `addr`: a string, nil (blank/absent), or
+   `{:error msg}` when the property's formula blows up. Errors are surfaced (not
+   swallowed) so a broken style formula is visible — same contract as `value`."
+  [{:keys [rt styles]} addr prop]
+  (when-let [{:keys [kind raw spin]} (get-in @styles [addr prop])]
+    (case kind
+      :literal raw
+      :formula (binding [ec/*execution-context* rt]
+                 (try (let [v @spin] (when (some? v) (str v)))
+                      (catch Exception e {:error (.getMessage e)}))))))
+
+(defn style-errors
+  "Seq of [prop msg] for `addr`'s style props that currently error (for toast)."
+  [{:keys [styles] :as sheet} addr]
+  (keep (fn [prop] (let [v (style-value sheet addr prop)]
+                     (when (:error v) [prop (:error v)])))
+        (keys (get @styles addr))))
+
+(defn style-deps
+  "Addresses referenced by `addr`'s style formulas (reverse edges to re-render
+   when a value changes). Excludes `addr` itself (its own re-render is implied)."
+  [{:keys [styles]} addr]
+  (disj (reduce into #{} (map :deps (vals (get @styles addr)))) addr))
+
+(defn style-dependents
+  "Addresses whose style formulas reference `addr` — must re-render when `addr`
+   changes (the style layer's analogue of `dependents*`)."
+  [{:keys [styles]} addr]
+  (set (keep (fn [[a props]]
+               (when (some #(contains? (:deps %) addr) (vals props)) a))
+             @styles)))
+
+(defn document-styles
+  "Serializable style source: {addr {prop raw}} (only cells that have any)."
+  [{:keys [styles]}]
+  (into {} (keep (fn [[a props]]
+                   (when (seq props)
+                     [a (into {} (map (fn [[p e]] [p (:raw e)])) props)])))
+        @styles))
+
+;; --- axis sizing --------------------------------------------------------
+;;
+;; Per-column widths / per-row heights, sparse: only non-default entries are
+;; stored, keyed by zero-based index. Plain pixel integers (not reactive
+;; formulas) — the rendering geometry wants concrete numbers, and width-by-
+;; formula is a rare need we can layer on later via the style machinery.
+
+(defn- pos-int [n] (let [n (long n)] (when (pos? n) n)))
+
+(defn set-col-width!  [{:keys [cols]} ci w]
+  (if-let [w (pos-int w)] (swap! cols assoc (long ci) w) (swap! cols dissoc (long ci))))
+(defn set-row-height! [{:keys [rows]} ri h]
+  (if-let [h (pos-int h)] (swap! rows assoc (long ri) h) (swap! rows dissoc (long ri))))
+
+(defn col-width  [{:keys [cols]} ci] (get @cols (long ci)))
+(defn row-height [{:keys [rows]} ri] (get @rows (long ri)))
+(defn col-widths  [{:keys [cols]}] @cols)
+(defn row-heights [{:keys [rows]}] @rows)
+
+(defn load-sizing!
+  "Replace the axis-size maps from a stored document (keys may arrive as ints)."
+  [{:keys [cols rows]} col-map row-map]
+  (reset! cols (into {} (map (fn [[k v]] [(long k) (long v)])) col-map))
+  (reset! rows (into {} (map (fn [[k v]] [(long k) (long v)])) row-map)))
+
 ;; --- persistence (source, not runtime state) ---------------------------
 
 (defn document
-  "Serializable source of the sheet: {addr {:value raw}}. Per-cell PROPERTY map
-   — add :style/:format keys later (each a reactive property compiled from its
-   source). Runtime spins are rebuilt from this; we never serialize the graph."
-  [{:keys [meta]}]
-  (into {} (map (fn [[a m]] [a {:value (:raw m)}])) @meta))
+  "Serializable source of the sheet: {addr {:value raw :style {prop raw}}}.
+   Per-cell PROPERTY map; :style holds presentational source (each a reactive
+   property compiled from its source). :format slots in the same way later.
+   Runtime spins are rebuilt from this; we never serialize the graph."
+  [{:keys [meta] :as sheet}]
+  (let [st (document-styles sheet)]
+    (into {} (map (fn [[a m]]
+                    [a (cond-> {:value (:raw m)}
+                         (seq (get st a)) (assoc :style (get st a)))]))
+          @meta)))
 
 (defn load-document!
-  "Rebuild a sheet's cells from a document map. Order-independent: formula refs
-   resolve at run time, so a cell may load before its dependencies."
+  "Rebuild a sheet's cells (and their style props) from a document map.
+   Order-independent: formula refs resolve at run time, so a cell may load
+   before its dependencies."
   [sheet doc]
   (doseq [[addr props] doc]
     (when-let [raw (:value props)]
-      (set-cell! sheet addr raw)))
+      (set-cell! sheet addr raw))
+    (doseq [[prop raw] (:style props)]
+      (set-style! sheet addr prop raw)))
   sheet)

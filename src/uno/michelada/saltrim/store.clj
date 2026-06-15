@@ -50,13 +50,19 @@
   (and (valid-id? id) (.exists (file id))))
 
 (defn save!
-  "Persist a sheet's source document under `id`, with its ownership meta."
+  "Persist a sheet's source document under `id`, with its ownership meta. Axis
+   sizing (per-column widths / per-row heights) rides alongside :cells as the
+   top-level :cols/:rows maps (omitted when empty)."
   ([id sheet] (save! id sheet nil))
   ([id sheet {:keys [owner public]}]
-   (let [f (file id)]
+   (let [f    (file id)
+         cw   (sheet/col-widths sheet)
+         rh   (sheet/row-heights sheet)]
      (io/make-parents f)
-     (spit f (pr-str {:fmt fmt :owner owner :public (boolean public)
-                      :cells (sheet/document sheet)})))
+     (spit f (pr-str (cond-> {:fmt fmt :owner owner :public (boolean public)
+                              :cells (sheet/document sheet)}
+                       (seq cw) (assoc :cols cw)
+                       (seq rh) (assoc :rows rh)))))
    id))
 
 (defn load-record
@@ -65,9 +71,10 @@
    fmt 1 files have no envelope -> owner nil, public true (legacy)."
   [id]
   (when (exists? id)
-    (let [{:keys [fmt cells owner public]} (edn/read-string (slurp (file id)))
+    (let [{:keys [fmt cells owner public cols rows]} (edn/read-string (slurp (file id)))
           s (sheet/create-sheet)]
       (sheet/load-document! s cells)
+      (sheet/load-sizing! s (or cols {}) (or rows {}))
       (sheet/settle! s)
       {:sh s
        :owner owner

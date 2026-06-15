@@ -191,3 +191,21 @@ REMAINING:
   text input remains for creating/opening a sheet by a new name.
 - **OAuth state + auth sessions are single-node** (in-memory nonces, atom
   registries). Fine for the current single-JVM deploy.
+
+## Cell presentation (style / format / sizing)
+
+- **Style props are reactive; axis sizes are not.** Per-cell `:style`/`:format`
+  props compile to spins (literal or `=`-formula, `$val` = own value). Column
+  widths / row heights are plain pixel integers (`:cols`/`:rows`, sparse,
+  zero-based index keys) — the rendering geometry wants concrete numbers. A
+  formula-backed width/height is a rare need we can layer on later via the same
+  style machinery if asked.
+- **Style UI is a raw text field.** The toolbar style row takes a literal/
+  formula string for any prop; no color picker / bold toggle / mask presets yet.
+  A friendlier control set is a follow-up (the engine + `/style` endpoint don't
+  change).
+- **Format = number masks only.** `fmt/apply-mask` supports `0 # . , %` and
+  literal prefix/suffix. No date/time patterns yet; non-numbers pass through.
+- **Resize re-renders the whole window** (`/size` → `render-window!` +
+  `broadcast-window!`). Cheap at current window sizes; if windows grow a lot it
+  could push just the affected strips instead.

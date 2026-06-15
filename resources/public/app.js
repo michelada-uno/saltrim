@@ -17,8 +17,34 @@ function geo() {
 }
 function meta() {
   const m = $('meta');
+  const pj = function (s) { try { return JSON.parse(s || '{}'); } catch (e) { return {}; } };
   return {tw: +((m && m.dataset.tw) || 1), th: +((m && m.dataset.th) || 1),
-          cb: +((m && m.dataset.cb) || 0), rb: +((m && m.dataset.rb) || 0)};
+          cb: +((m && m.dataset.cb) || 0), rb: +((m && m.dataset.rb) || 0),
+          colw: pj(m && m.dataset.colw), rowh: pj(m && m.dataset.rowh)};
+}
+
+// --- variable axis geometry -------------------------------------------------
+// Columns/rows default to base px (CW/RH) but carry sparse per-index overrides
+// (the colw/rowh maps from #meta). Offsets are the uniform base plus the
+// (override-base) delta of every sized index before it — same math as web.clj.
+function axisSize(i, base, ov) { const v = ov[i]; return v != null ? v : base; }
+function axisPos(i, base, ov) {
+  let p = i * base;
+  for (const k in ov) if (+k < i) p += ov[k] - base;
+  return p;
+}
+function pixelToIndex(px, base, ov) {
+  const ks = Object.keys(ov).map(Number).sort(function (a, b) { return a - b; });
+  let pos = 0, idx = 0;
+  for (const k of ks) {
+    const gap = k - idx;
+    if (pos + gap * base > px) return idx + Math.floor((px - pos) / base);
+    pos += gap * base; idx = k;
+    const sz = ov[k];
+    if (pos + sz > px) return k;
+    pos += sz; idx = k + 1;
+  }
+  return idx + Math.floor((px - pos) / base);
 }
 function viewSize() {
   const c = $('cellclip');
@@ -29,7 +55,7 @@ function setT(id, x, y) { const e = $(id); if (e) e.style.transform = 'translate
 function render() {
   const g = geo(), m = meta();
   // translate relative to the CONTENT base (cb,rb) -> always aligned to #cells
-  const tx = m.cb * g.CW - SX, ty = m.rb * g.RH - SY;
+  const tx = axisPos(m.cb, g.CW, m.colw) - SX, ty = axisPos(m.rb, g.RH, m.rowh) - SY;
   setT('cells', tx, ty);
   setT('self', tx, ty);      // own selection/editing overlay tracks the cell layer
   setT('peers', tx, ty);     // collaborator overlay tracks the cell layer
@@ -58,8 +84,8 @@ function clampScroll() {
 }
 
 function requestView(force) {
-  const g = geo();
-  const c0 = Math.floor(SX / g.CW), r0 = Math.floor(SY / g.RH);
+  const g = geo(), m = meta();
+  const c0 = pixelToIndex(SX, g.CW, m.colw), r0 = pixelToIndex(SY, g.RH, m.rowh);
   if (!force && c0 === _lastC0 && r0 === _lastR0) return;
   _lastC0 = c0; _lastR0 = r0;
   clearTimeout(_viewTimer);
@@ -130,18 +156,19 @@ function setSel(addr) {        // set $sel + post selection presence (cursor, ed
 
 function ensureVisible(addr) {
   const p = parseAddr(addr); if (!p) return;
-  const g = geo(), vs = viewSize();
-  const x = p.ci * g.CW, y = p.ri * g.RH;
-  if (x < SX) SX = x; else if (x + g.CW > SX + vs.w) SX = x + g.CW - vs.w;
-  if (y < SY) SY = y; else if (y + g.RH > SY + vs.h) SY = y + g.RH - vs.h;
+  const g = geo(), m = meta(), vs = viewSize();
+  const x = axisPos(p.ci, g.CW, m.colw), y = axisPos(p.ri, g.RH, m.rowh);
+  const w = axisSize(p.ci, g.CW, m.colw), h = axisSize(p.ri, g.RH, m.rowh);
+  if (x < SX) SX = x; else if (x + w > SX + vs.w) SX = x + w - vs.w;
+  if (y < SY) SY = y; else if (y + h > SY + vs.h) SY = y + h - vs.h;
   SX = Math.max(0, SX); SY = Math.max(0, SY);
   render(); requestView(false);
 }
 
 function jump(addr) {
   const p = parseAddr(addr); if (!p) return;
-  const g = geo();
-  SX = p.ci * g.CW; SY = p.ri * g.RH;     // park target at top-left; /view extends totals
+  const g = geo(), m = meta();
+  SX = axisPos(p.ci, g.CW, m.colw); SY = axisPos(p.ri, g.RH, m.rowh);  // park at top-left; /view extends totals
   setSel(makeAddr(p.ci, p.ri));
   render(); requestView(true);
 }
@@ -159,8 +186,10 @@ function startEdit(addr) {
   addr = makeAddr(p.ci, p.ri);
   setSelValue(addr); ensureVisible(addr);   // set $sel; the edittrigger below posts presence (edit=true)
   const g = geo(), m = meta(), ed = $('editor'), cell = $('c_' + addr);
-  ed.style.left = ((p.ci - m.cb) * g.CW) + 'px';
-  ed.style.top  = ((p.ri - m.rb) * g.RH) + 'px';
+  ed.style.left   = (axisPos(p.ci, g.CW, m.colw) - axisPos(m.cb, g.CW, m.colw)) + 'px';
+  ed.style.top    = (axisPos(p.ri, g.RH, m.rowh) - axisPos(m.rb, g.RH, m.rowh)) + 'px';
+  ed.style.width  = (axisSize(p.ci, g.CW, m.colw) - 1) + 'px';
+  ed.style.height = (axisSize(p.ri, g.RH, m.rowh) - 1) + 'px';
   ed.value = cell ? (cell.dataset.raw || '') : '';
   ed.dispatchEvent(new Event('input', {bubbles: true}));   // -> $v
   ed.style.display = 'block';
@@ -227,6 +256,45 @@ function initEditor() {
   ed.addEventListener('dblclick', function () { commitEdit(); });
 }
 
+// --- column / row resize ----------------------------------------------------
+// Header strips render a thin .colgrip/.rowgrip on each trailing edge. Dragging
+// one moves a single guide line; on release we set the resize signals and click
+// #sizetrigger (Datastar @post /size). The server stores the new px and
+// re-renders the window, so there's no live cell reflow to compute here.
+const MINSZ = 24;
+function setSig(name, val) {
+  const b = $(name + 'box');
+  if (b) { b.value = val; b.dispatchEvent(new Event('input', {bubbles: true})); }
+}
+function initResize() {
+  const vp = $('viewport'); if (!vp || vp.__rzInit) return; vp.__rzInit = true;
+  vp.addEventListener('mousedown', function (e) {
+    const t = e.target, cls = t.classList;
+    const col = cls && cls.contains('colgrip'), row = cls && cls.contains('rowgrip');
+    if (!col && !row) return;
+    e.preventDefault(); e.stopPropagation();
+    const g = geo(), m = meta(), guide = $('rzguide'), rect = vp.getBoundingClientRect();
+    const axis = col ? 'col' : 'row';
+    const idx = col ? +t.dataset.ci : +t.dataset.ri;
+    const base = col ? g.CW : g.RH, ov = col ? m.colw : m.rowh;
+    const start = col ? e.clientX : e.clientY, startSz = axisSize(idx, base, ov);
+    let sz = startSz;
+    function place(client) {
+      if (col) { guide.style.cssText = 'display:block;top:0;height:100%;width:2px;left:' + (client - rect.left) + 'px'; }
+      else { guide.style.cssText = 'display:block;left:0;width:100%;height:2px;top:' + (client - rect.top) + 'px'; }
+    }
+    place(start);
+    function mm(e2) { const cur = col ? e2.clientX : e2.clientY; sz = Math.max(MINSZ, Math.round(startSz + (cur - start))); place(cur); }
+    function mu() {
+      document.removeEventListener('mousemove', mm); document.removeEventListener('mouseup', mu);
+      guide.style.display = 'none';
+      setSig('rzaxis', axis); setSig('rzidx', idx); setSig('rzsize', sz);
+      const tr = $('sizetrigger'); if (tr) tr.click();
+    }
+    document.addEventListener('mousemove', mm); document.addEventListener('mouseup', mu);
+  });
+}
+
 function initScroll() {
   const v = $('viewport'); if (!v || v.__scrollInit) return;
   v.__scrollInit = true;
@@ -236,6 +304,7 @@ function initScroll() {
   window.addEventListener('resize', render);
   document.addEventListener('keydown', onKey);
   initEditor();
+  initResize();
   render();  // page already rendered the window at (0,0)
 }
 
