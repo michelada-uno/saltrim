@@ -1,4 +1,4 @@
-(ns uno.michelada.clorax.spike4
+(ns uno.michelada.saltrim.spike4
   "Step 4 spike — uniform model: every cell is a Spin; refs use `await`
    (handles Spins, unlike `track`). Literal = spin over editable signal.
    Proves formula->formula cascade + edit propagation.

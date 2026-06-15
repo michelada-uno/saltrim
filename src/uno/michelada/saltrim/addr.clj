@@ -1,4 +1,4 @@
-(ns uno.michelada.clorax.addr
+(ns uno.michelada.saltrim.addr
   "Spreadsheet addressing. Address = COL + ROW, e.g. \"A1\", \"AAB1234\".
    COL = bijective base-26 letters (A=1, Z=26, AA=27, ...). ROW = 1-based int.
    No colon in an address — colon is reserved for ranges (\"A1:C3\").

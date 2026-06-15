@@ -1,4 +1,4 @@
-// Clorax logical-scroll engine. No native scroll / giant spacer: we keep a
+// SaltRim logical-scroll engine. No native scroll / giant spacer: we keep a
 // logical pixel position (SX,SY), translate the rendered window's layers by the
 // sub-cell offset for smoothness, and fetch a new window (POST /view) only when
 // the top-left cell index changes. Geometry comes from #viewport data-*; the

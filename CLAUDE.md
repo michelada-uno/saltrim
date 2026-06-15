@@ -1,4 +1,4 @@
-# Clorax — working instructions
+# SaltRim — working instructions
 
 A simple-but-powerful spreadsheet: **Clojure** engine on **Spindel** (reactive),
 **Datastar** UI (hypermedia, SSE), file persistence, live collaboration.
@@ -8,8 +8,9 @@ Read `SPEC.md` for the technical architecture. This file = how to work here.
 
 - **Qdrant:** When available, use Qdrant MCP server (`mcp-server-qdrant`, 
   `qdrant-local`, etc...) for persistent vector memory. When using it, explicitly
-  use collection name `dev-clorax` (migrated from `dev-calcloj` after the rename;
-  old collection kept as backup). If the MCP tools error, the Qdrant REST API on
+  use collection name `dev-saltrim` (project history: `dev-calcloj` →
+  `dev-clorax` → `dev-saltrim` across renames; older collections kept as
+  backups). If the MCP tools error, the Qdrant REST API on
   `localhost:6333` works directly (scroll/upsert).
 
 ## Communication style
@@ -56,22 +57,22 @@ clojure -X:test        # engine + addr + store suites
 clojure -M:spike       # Step-0 lifecycle spike (and :spike0b, plus spike4.clj)
 node --check resources/public/app.js
 
-clojure -T:build uber             # runnable uberjar -> target/clorax-<v>.jar
-java -jar target/clorax-<v>.jar  # run the built artifact (serves :8080)
+clojure -T:build uber             # runnable uberjar -> target/saltrim-<v>.jar
+java -jar target/saltrim-<v>.jar  # run the built artifact (serves :8080)
 ```
 
 **Identity store (Datahike).** Users + auth tokens live in Datahike (`db` ns),
-not files. Dev/staging defaults to an H2 file at `data/clorax-h2`; prod sets
-`CLORAX_DB_JDBC_URL` (YugabyteDB); tests use `:memory`. Env: `CLORAX_DB_BACKEND`
-(`mem`), `CLORAX_DB_JDBC_URL`, `CLORAX_DB_TABLE`, `CLORAX_DB_PATH` (H2 file),
-`CLORAX_DB_ID` (stable store UUID). JDBC is konserve-jdbc directly (forked for
+not files. Dev/staging defaults to an H2 file at `data/saltrim-h2`; prod sets
+`SALTRIM_DB_JDBC_URL` (YugabyteDB); tests use `:memory`. Env: `SALTRIM_DB_BACKEND`
+(`mem`), `SALTRIM_DB_JDBC_URL`, `SALTRIM_DB_TABLE`, `SALTRIM_DB_PATH` (H2 file),
+`SALTRIM_DB_ID` (stable store UUID). JDBC is konserve-jdbc directly (forked for
 YugabyteDB — see `deps.edn`); **datahike-jdbc is NOT used** (datahike 0.8
 connects konserve stores generically). Sheet CELL data still lives in
-`<CLORAX_DATA_DIR>/<id>.edn` (env, default `data/`). **Spindel stays pinned at
+`<SALTRIM_DATA_DIR>/<id>.edn` (env, default `data/`). **Spindel stays pinned at
 0.1.15** — 0.1.23 breaks structural rebuild (see TECHDEBT.md).
 
-Namespaces are rooted at `uno.michelada.clorax.*` under
-`src/uno/michelada/clorax/`. Coordinate `uno.michelada/clorax`; repo lives in
+Namespaces are rooted at `uno.michelada.saltrim.*` under
+`src/uno/michelada/saltrim/`. Coordinate `uno.michelada/saltrim`; repo lives in
 the `michelada-uno` GitHub org. **Releases are GitHub-only (no Clojars)**: push a
 `v*` tag and `.github/workflows/release.yml` tests, builds the uberjar, and
 attaches it to a GitHub Release. See SPEC.md "Build & release".
@@ -144,7 +145,7 @@ errors+toast, cycle detection, tests, persistence, sessions (beacon + TTL
 sweep), live collaboration (push streams + reconnect), logical scroll, keyboard
 navigation, **auth + multi-tenancy** (OAuth GitHub/Google + dev login, per-user
 sheets `<uid>__<name>`, named presence). Dev login is on by default when no
-`CLORAX_*_CLIENT_ID/SECRET` env vars are set. **Sharing** is a Datahike ACL of
+`SALTRIM_*_CLIENT_ID/SECRET` env vars are set. **Sharing** is a Datahike ACL of
 `share` grants (db ns): a **capability link** (`:link` grant — an unguessable
 token in the URL, `?t=…`, rotatable) at a **read-only or edit** level, plus
 **direct per-user grants** (share by name in dev / email in prod); owner-only

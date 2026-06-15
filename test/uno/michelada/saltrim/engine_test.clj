@@ -1,7 +1,7 @@
-(ns uno.michelada.clorax.engine-test
+(ns uno.michelada.saltrim.engine-test
   "Engine behavior, no UI. Values, chains, ranges, errors, structural rebuild."
   (:require [clojure.test :refer [deftest testing is]]
-            [uno.michelada.clorax.sheet :as sh]))
+            [uno.michelada.saltrim.sheet :as sh]))
 
 (defn- mk [] (sh/create-sheet))
 (defn- put [s a raw] (sh/set-cell! s a raw))

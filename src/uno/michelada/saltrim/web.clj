@@ -1,4 +1,4 @@
-(ns uno.michelada.clorax.web
+(ns uno.michelada.saltrim.web
   "Windowed spreadsheet grid over the sheet engine, driven by Datastar.
 
    Viewport: a scroll container holds a full-size spacer (real scrollbar for a
@@ -17,11 +17,11 @@
             [org.httpkit.server :as http]
             [hiccup2.core :as h]
             [jsonista.core :as json]
-            [uno.michelada.clorax.addr :as addr]
-            [uno.michelada.clorax.auth :as auth]
-            [uno.michelada.clorax.db :as db]
-            [uno.michelada.clorax.sheet :as sheet]
-            [uno.michelada.clorax.store :as store]
+            [uno.michelada.saltrim.addr :as addr]
+            [uno.michelada.saltrim.auth :as auth]
+            [uno.michelada.saltrim.db :as db]
+            [uno.michelada.saltrim.sheet :as sheet]
+            [uno.michelada.saltrim.store :as store]
             [starfederation.datastar.clojure.api :as d*]
             [starfederation.datastar.clojure.adapter.http-kit :as hk])
   (:gen-class))
@@ -387,7 +387,7 @@
     [:html
      [:head
       [:meta {:charset "utf-8"}]
-      [:title "Clorax"]
+      [:title "SaltRim"]
       ;; Cells are display <div class="cell"> (not inputs); the floating editor
       ;; is the single #editor input. Both are absolutely positioned (cells by
       ;; their inline left/top, #editor by app.js) — without this the left/top
@@ -952,9 +952,9 @@
      "<!doctype html>"
      (h/html
       [:html
-       [:head [:meta {:charset "utf-8"}] [:title "Clorax — sign in"]]
+       [:head [:meta {:charset "utf-8"}] [:title "SaltRim — sign in"]]
        [:body {:style "font-family:sans-serif;max-width:24rem;margin:14vh auto;"}
-        [:h1 {:style "font-weight:600;"} "Clorax"]
+        [:h1 {:style "font-weight:600;"} "SaltRim"]
         [:p {:style "color:#666;"} "Sign in to open your sheets."]
         (when err
           [:p {:style "color:#c0392b;font:13px sans-serif;"} (url-decode err)])
@@ -976,7 +976,7 @@
    "<!doctype html>"
    (h/html
     [:html
-     [:head [:meta {:charset "utf-8"}] [:title "Clorax — no access"]]
+     [:head [:meta {:charset "utf-8"}] [:title "SaltRim — no access"]]
      [:body {:style "font-family:sans-serif;max-width:24rem;margin:14vh auto;"}
       [:h1 {:style "font-weight:600;"} "No access"]
       [:p {:style "color:#666;"}
@@ -1087,7 +1087,7 @@
   (when @server* (@server*))
   (start-sweeper!)                          ; reap idle/orphan sessions
   (reset! server* (http/run-server #'app {:port (or port 8080)}))
-  (println "Clorax on http://localhost:" (or port 8080))
+  (println "SaltRim on http://localhost:" (or port 8080))
   (println "auth:" (if-let [ps (seq (keys (auth/providers)))]
                      (str/join ", " (map name ps))
                      "none configured")

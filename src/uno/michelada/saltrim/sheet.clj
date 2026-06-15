@@ -1,4 +1,4 @@
-(ns uno.michelada.clorax.sheet
+(ns uno.michelada.saltrim.sheet
   "Cell registry over a Spindel execution context — uniform Spin model.
 
    Per sheet (all in ctx metadata so compiled bodies resolve cells):
@@ -10,7 +10,7 @@
    Formula cell  = Spin compiled from an `=`-expression; refs other cells via
                    `await`, so formula->formula works."
   (:require [clojure.string :as str]
-            [uno.michelada.clorax.formula :as formula]
+            [uno.michelada.saltrim.formula :as formula]
             [org.replikativ.spindel.signal :as sig]
             [org.replikativ.spindel.spin.core :as spin-core]
             [org.replikativ.spindel.engine.core :as ec]

@@ -1,8 +1,8 @@
-(ns uno.michelada.clorax.store-test
+(ns uno.michelada.saltrim.store-test
   (:require [clojure.test :refer [deftest testing is]]
             [clojure.java.io :as io]
-            [uno.michelada.clorax.sheet :as sheet]
-            [uno.michelada.clorax.store :as store]))
+            [uno.michelada.saltrim.sheet :as sheet]
+            [uno.michelada.saltrim.store :as store]))
 
 (def ^:private id "test_roundtrip")
 

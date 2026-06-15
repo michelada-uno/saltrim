@@ -1,8 +1,8 @@
-(ns uno.michelada.clorax.db-test
+(ns uno.michelada.saltrim.db-test
   (:require [clojure.test :refer [deftest testing is use-fixtures]]
-            [uno.michelada.clorax.db :as db]))
+            [uno.michelada.saltrim.db :as db]))
 
-;; Fresh in-memory Datahike per test (CLORAX_DB_BACKEND-independent).
+;; Fresh in-memory Datahike per test (SALTRIM_DB_BACKEND-independent).
 (use-fixtures :each (fn [t] (db/init-mem!) (t)))
 
 (deftest user-upsert-and-lookup

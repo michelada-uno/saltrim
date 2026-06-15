@@ -1,4 +1,4 @@
-(ns uno.michelada.clorax.runtime
+(ns uno.michelada.saltrim.runtime
   "Runtime support referenced by compiled cell bodies, resolving against the
    CURRENT execution context's metadata (works on executor threads).
 

@@ -1,4 +1,4 @@
-(ns uno.michelada.clorax.formula
+(ns uno.michelada.saltrim.formula
   "Formula = restricted Clojure expression. Cell refs via reader tags:
      #cell  A1       -> current value of A1
      #cells A1:A3    -> vector of current values [A1 A2 A3]      (column)
@@ -27,8 +27,8 @@
             [org.replikativ.spindel.spin.cps :refer [spin]]
             [org.replikativ.spindel.effects.track :refer [track]]
             [org.replikativ.spindel.effects.await :refer [await]]
-            [uno.michelada.clorax.addr :as addr]
-            [uno.michelada.clorax.runtime :as rt]))
+            [uno.michelada.saltrim.addr :as addr]
+            [uno.michelada.saltrim.runtime :as rt]))
 
 ;; --- parse --------------------------------------------------------------
 
@@ -61,7 +61,7 @@
 
 (def allowed-ops
   '#{+ - * / await track deref vector
-     uno.michelada.clorax.runtime/lookup uno.michelada.clorax.runtime/lookup-val
+     uno.michelada.saltrim.runtime/lookup uno.michelada.saltrim.runtime/lookup-val
      min max abs mod quot rem inc dec
      = not= < > <= >= and or not if when
      map reduce count})
@@ -89,7 +89,7 @@
       (let [sym  (into {} (map (fn [a] [a (gensym "c_")]) addrs))
             body (walk/postwalk (fn [x] (if (ref? x) (sym (second x)) x)) form)
             bnds (vec (mapcat (fn [a] [(sym a)
-                                       (list 'await (list 'uno.michelada.clorax.runtime/lookup a))])
+                                       (list 'await (list 'uno.michelada.saltrim.runtime/lookup a))])
                               addrs))]
         (list 'let bnds body)))))
 
@@ -100,11 +100,11 @@
    in this namespace so spin/track/await resolve and CPS sees the effects."
   [form]
   (validate! form)
-  (binding [*ns* (find-ns 'uno.michelada.clorax.formula)]
+  (binding [*ns* (find-ns 'uno.michelada.saltrim.formula)]
     (eval (list 'spin (lift form)))))
 
 (defn compile-literal-wrapper
   "Spin exposing a literal cell's editable signal as a public awaitable node:
    (spin (deref (track (lookup-val addr))))."
   [addr]
-  (compile (list 'deref (list 'track (list 'uno.michelada.clorax.runtime/lookup-val addr)))))
+  (compile (list 'deref (list 'track (list 'uno.michelada.saltrim.runtime/lookup-val addr)))))

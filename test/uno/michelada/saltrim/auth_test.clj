@@ -1,7 +1,7 @@
-(ns uno.michelada.clorax.auth-test
+(ns uno.michelada.saltrim.auth-test
   (:require [clojure.test :refer [deftest testing is use-fixtures]]
-            [uno.michelada.clorax.auth :as auth]
-            [uno.michelada.clorax.db :as db]))
+            [uno.michelada.saltrim.auth :as auth]
+            [uno.michelada.saltrim.db :as db]))
 
 ;; Users + tokens live in Datahike; each test runs against a fresh in-memory db.
 (use-fixtures :each (fn [t] (db/init-mem!) (t)))
@@ -18,12 +18,12 @@
       (is (= "Test Üser 42" (:name (auth/user-info uid)))))
     (testing "token resolves through the auth cookie"
       (let [req {:headers {"cookie" (str "other=1; "
-                                         (second (re-find #"^(clorax_auth=[a-f0-9]+)"
+                                         (second (re-find #"^(saltrim_auth=[a-f0-9]+)"
                                                           (auth/auth-cookie token))))}}]
         (is (= uid (auth/req->uid req)))))
     (testing "revoked token no longer authenticates"
       (auth/revoke-token! token)
-      (is (nil? (auth/req->uid {:headers {"cookie" (str "clorax_auth=" token)}}))))))
+      (is (nil? (auth/req->uid {:headers {"cookie" (str "saltrim_auth=" token)}}))))))
 
 (deftest dev-login-rejects-blank
   (is (:error (auth/dev-login! "")))
@@ -38,8 +38,8 @@
 
 (deftest req->uid-ignores-garbage
   (is (nil? (auth/req->uid {:headers {}})))
-  (is (nil? (auth/req->uid {:headers {"cookie" "clorax_auth=nothex"}})))
-  (is (nil? (auth/req->uid {:headers {"cookie" (str "clorax_auth=" (apply str (repeat 64 "f")))}}))))
+  (is (nil? (auth/req->uid {:headers {"cookie" "saltrim_auth=nothex"}})))
+  (is (nil? (auth/req->uid {:headers {"cookie" (str "saltrim_auth=" (apply str (repeat 64 "f")))}}))))
 
 (deftest resolve-grantee-dev-uses-name
   ;; dev mode (no provider env) — a name resolves to the deterministic dev uid,

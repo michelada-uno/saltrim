@@ -5,7 +5,7 @@ name: release
 #
 #   git tag v1.2.3 && git push origin v1.2.3
 #
-# No Clojars publishing — Clorax is a runnable app, distributed as the uberjar
+# No Clojars publishing — SaltRim is a runnable app, distributed as the uberjar
 # on the GitHub Release.
 
 on:
@@ -58,6 +58,6 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/clorax-${{ steps.ver.outputs.version }}.jar
+          files: target/saltrim-${{ steps.ver.outputs.version }}.jar
           generate_release_notes: true
           fail_on_unmatched_files: true
