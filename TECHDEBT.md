@@ -127,10 +127,19 @@ fork), `:memory` for tests. Verified: token survives a server restart; logout
 revokes it. (Old `data/users.edn`/`data/tokens.edn` are now unused.)
 
 REMAINING:
-- **Sheets metadata + shares still file-based.** Next Datahike step: move
-  sheet `:owner`/`:public` (→ ACL grants) out of the EDN file into the `sheet`/
-  `share` entities (schema already defined in `db`), switch sheet ids to uuids,
-  and migrate existing fmt-2 files. `accessible-rec` then queries the ACL.
+- **Sheet `:public` flag moved to the DB ACL — DONE (Datahike step 2a).** A
+  sheet's public state is now an `:everyone`/`:read-write` `share` row, not the
+  file's `:public` bool. `sheet-rec` registers the `sheet` entity (`ensure-
+  sheet!`) and, on its FIRST registration, one-shot-migrates the file's legacy
+  `:public` into a grant; `accessible-rec` queries `db/access-level`; `handle-
+  share` toggles the grant. The file envelope still carries `:public` (vestigial
+  migration seed; harmless). Sheet ids stay `<owner>__<name>` strings (the uuid
+  switch was NOT needed and is deferred).
+  REMAINING (PR-B): **direct user grants** (`:user` kind — share to one uid by
+  name in dev / email in prod) and a **read-only tier** (the `:read` level +
+  `/cell` write-guard); the schema + `access-level` already model both. A share
+  **panel UI** (list grantees, add/remove, level picker) and per-sheet picker
+  **level icons** land with it.
 - **Spindel pinned at 0.1.15**: 0.1.23 changes spin-cancellation semantics and
   breaks the structural-rebuild path (recomputed cells come back
   `{:error "Spin cancelled by user"}`; 2 engine-test failures). Bumping spindel

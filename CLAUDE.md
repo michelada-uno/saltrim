@@ -43,7 +43,7 @@ If the user types `/caveman`, invoke the `caveman` Skill.
 - **Spike risky unknowns first** (there are `spike*.clj` files proving Spindel
   behavior). Don't build UI on unproven engine assumptions.
 - **Test after engine changes**: `clojure -X:test` (must stay green, currently
-  26 tests / 101 assertions; `db`/`auth` suites use the `:memory` Datahike
+  28 tests / 116 assertions; `db`/`auth` suites use the `:memory` Datahike
   backend). Add tests for new engine behavior.
 - **Check `app.js` syntax** after editing: `node --check resources/public/app.js`.
 - Keep `TECHDEBT.md` current — append when you defer something, mark items DONE.

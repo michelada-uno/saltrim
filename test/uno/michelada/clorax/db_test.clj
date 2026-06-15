@@ -32,3 +32,34 @@
   ;; if the fixture didn't reset, a previous test's user would leak
   (is (nil? (db/user-info "gh-1")))
   (is (nil? (db/user-info "dev-bob"))))
+
+(deftest sheet-register-is-idempotent
+  (db/upsert-user! {:uid "dev-ann" :name "Ann"})
+  (is (true?  (db/ensure-sheet! "dev-ann__budget" "dev-ann" "budget"))
+      "first registration is new")
+  (is (false? (db/ensure-sheet! "dev-ann__budget" "dev-ann" "budget"))
+      "second registration is a no-op")
+  (testing "owner ref is set when the user exists, skipped otherwise"
+    (is (true? (db/ensure-sheet! "ghost__x" "ghost" "x")))) ; no such user — must not throw
+  (testing "an unregistered sheet has no grants and is private"
+    (is (false? (db/public? "nobody__none")))
+    (is (nil?   (db/access-level "anyone" "nobody__none")))))
+
+(deftest public-grant-toggle-and-access
+  (db/upsert-user! {:uid "dev-ann" :name "Ann"})
+  (db/ensure-sheet! "dev-ann__sheet" "dev-ann" "sheet")
+  (testing "private by default"
+    (is (false? (db/public? "dev-ann__sheet")))
+    (is (nil?   (db/access-level "dev-bob" "dev-ann__sheet"))))
+  (testing "going public adds an :everyone/:read-write grant reachable by anyone"
+    (is (true? (db/set-public! "dev-ann__sheet" true)))
+    (is (true? (db/public? "dev-ann__sheet")))
+    (is (= :read-write (db/access-level "dev-bob" "dev-ann__sheet"))))
+  (testing "set-public! is idempotent (no duplicate :everyone rows)"
+    (db/set-public! "dev-ann__sheet" true)
+    (is (= 1 (count (db/sheet-grants "dev-ann__sheet")))))
+  (testing "going private removes the grant"
+    (is (false? (db/set-public! "dev-ann__sheet" false)))
+    (is (false? (db/public? "dev-ann__sheet")))
+    (is (empty? (db/sheet-grants "dev-ann__sheet")))
+    (is (nil?   (db/access-level "dev-bob" "dev-ann__sheet")))))

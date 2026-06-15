@@ -19,6 +19,7 @@
             [jsonista.core :as json]
             [uno.michelada.clorax.addr :as addr]
             [uno.michelada.clorax.auth :as auth]
+            [uno.michelada.clorax.db :as db]
             [uno.michelada.clorax.sheet :as sheet]
             [uno.michelada.clorax.store :as store]
             [starfederation.datastar.clojure.api :as d*]
@@ -69,13 +70,21 @@
 
 (defn- sheet-rec
   "The loaded record for a storage id; loads from disk lazily, else creates a
-   fresh private sheet owned by `owner`."
+   fresh private sheet owned by `owner`. Registers the sheet in the DB and, on
+   its first registration, migrates the file's legacy :public flag into an
+   :everyone grant (one-shot). The cached :public is thereafter read from the DB
+   (the ACL is the source of truth)."
   [id owner]
   (or (@sheets* id)
-      (let [rec (or (store/load-record id)
-                    {:sh (sheet/create-sheet) :owner owner :public false})]
-        (swap! sheets* assoc id rec)
-        rec)))
+      (let [loaded   (store/load-record id)
+            rec      (or loaded {:sh (sheet/create-sheet) :owner owner :public false})
+            [o n]    (store/split-id id)
+            owner    (or (:owner rec) o)
+            new?     (db/ensure-sheet! id owner n)]
+        (when (and new? (:public rec)) (db/set-public! id true))
+        (let [rec (assoc rec :owner owner :public (db/public? id))]
+          (swap! sheets* assoc id rec)
+          rec))))
 
 (defn- save-rec!
   "Persist a loaded sheet together with its ownership meta."
@@ -93,9 +102,9 @@
       (cond
         (nil? owner)  nil                       ; legacy un-namespaced ids: not served
         (= owner uid) (sheet-rec id uid)
-        :else (when-let [rec (or (@sheets* id)
-                                 (when (store/exists? id) (sheet-rec id owner)))]
-                (when (:public rec) rec))))))
+        :else (when (or (@sheets* id) (store/exists? id))
+                (let [rec (sheet-rec id owner)]
+                  (when (db/access-level uid id) rec)))))))
 
 ;; Sessions: one per client. Hold the sheet id + per-session viewport (view/dims)
 ;; so concurrent clients on the same sheet keep independent scroll. Each carries
@@ -349,10 +358,9 @@
         [owner _] (store/split-id storage-id)
         own?      (= owner uid)
         mine      (if own? (distinct (cons sname names)) names)]
-    [:select {:id "sheetpicker" :title "your sheets"
+    [:select {:id "sheetpicker" :class "tool" :title "your sheets"
               :data-on:change "el.value && (location.href='/?s='+el.value)"
-              :style (str "max-width:9rem;font:13px sans-serif;padding:5px 6px;"
-                          "border:1px solid #bbb;border-radius:4px;background:#f6f6f6;")}
+              :style "max-width:9rem;"}
      (when-not own?
        [:option {:value "" :selected true} (str "↗ " sname)])
      (for [n mine]
@@ -372,19 +380,34 @@
       ;; are ignored and everything stacks in flow at the top-left.
       [:style (h/raw
                (str
+                ;; design tokens — centralize colors/geometry so a merge can't
+                ;; silently drift them and so inline styles can share them.
+                ":root{--bg:#fff;--panel:#f6f6f6;--line:#bbb;--grid:#ddd;"
+                "--fg:#222;--muted:#666;--accent:#4a90d9;--accent2:#7aa7f0;"
+                "--danger:#c0392b;--radius:4px;}"
+                ;; toolbar: two rows. row 1 = picker/new/share/identity,
+                ;; row 2 = cell-ref + formula bar. .tool/.btn unify the inputs
+                ;; and buttons that used to repeat the same inline style string.
+                ".toolrow{display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem;}"
+                ".tool{font:13px sans-serif;padding:5px 6px;border:1px solid var(--line);"
+                "border-radius:var(--radius);background:var(--panel);}"
+                ".tool.mono{font-family:monospace;}"
+                ".btn{font:12px sans-serif;padding:5px 8px;border:1px solid var(--line);"
+                "border-radius:var(--radius);background:var(--panel);cursor:pointer;}"
+                ".spacer{flex:1;}"
                 (format (str ".cell{position:absolute;width:%dpx;height:%dpx;"
-                             "box-sizing:border-box;border:1px solid #ddd;"
+                             "box-sizing:border-box;border:1px solid var(--grid);"
                              "padding:2px 4px;font:13px monospace;overflow:hidden;"
-                             "white-space:nowrap;background:#fff;}"
+                             "white-space:nowrap;background:var(--bg);}"
                              "#editor{position:absolute;width:%dpx;height:%dpx;"
-                             "box-sizing:border-box;border:1px solid #4a90d9;"
+                             "box-sizing:border-box;border:1px solid var(--accent);"
                              "padding:2px 4px;font:13px monospace;outline:none;z-index:6;}")
                         (- CW 1) (- RH 1) (- CW 1) (- RH 1))
                 ;; selection / editing OVERLAY (#self), server-rendered. Literal %
                 ;; in the gradients -> kept OUT of the format call above.
                 ;; calm "you are here" selection box:
                 ".selfcell{position:absolute;box-sizing:border-box;pointer-events:none;"
-                "border:2px solid #7aa7f0;}"
+                "border:2px solid var(--accent2);}"
                 ;; actively editing: animated 'marching ants' border (four gradient
                 ;; edges whose position scrolls). pointer-events stays none so the
                 ;; cell beneath is still typable.
@@ -422,37 +445,35 @@
              :style (str "position:fixed;top:1rem;right:1rem;max-width:26rem;background:#c0392b;"
                          "color:#fff;padding:.6rem .9rem;border-radius:6px;font:13px sans-serif;"
                          "cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.3);z-index:20;")}]
-      ;; sheet picker + new-sheet box + address box (jump) + formula bar + sharing + identity
-      [:div {:style "display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem;"}
+      ;; ── toolbar row 1: sheet management + sharing + identity ───────────
+      [:div {:class "toolrow"}
        (sheet-picker uid storage-id sname)
-       [:input {:id "sheetbox" :placeholder "new sheet…"
+       [:input {:id "sheetbox" :class "tool" :placeholder "new sheet…"
                 :data-on:keydown "evt.key==='Enter' && el.value && (location.href='/?s='+el.value)"
                 :title "type a name + Enter to create/open one of your sheets"
-                :style (str "width:6rem;font:13px sans-serif;padding:5px 6px;"
-                            "border:1px solid #bbb;border-radius:4px;background:#f6f6f6;")}]
-       [:input {:id "addrbox" :data-bind:sel "" :placeholder "A1"
+                :style "width:6rem;"}]
+       ;; sharing toggle / badge (patched back by POST /share)
+       (h/raw (share-html uid storage-id))
+       [:span {:class "spacer"}]
+       ;; who am I + sign out
+       [:span {:style "font:12px sans-serif;color:var(--muted);white-space:nowrap;"}
+        (or (:name (auth/user-info uid)) uid)]
+       [:form {:method "post" :action "/logout" :style "margin:0;"}
+        [:button {:class "btn"} "sign out"]]]
+      ;; ── toolbar row 2: cell reference + formula bar ────────────────────
+      [:div {:class "toolrow"}
+       [:input {:id "addrbox" :class "tool mono" :data-bind:sel "" :placeholder "A1"
                 :data-on:keydown "evt.key==='Enter' && jump($sel)"
-                :style (str "width:5rem;font:13px monospace;padding:5px 6px;text-align:center;"
-                            "border:1px solid #bbb;border-radius:4px;")}]
+                :style "width:5rem;text-align:center;"}]
        ;; editing via the formula bar still drives presence on the SELECTED cell
        ;; (so it shows the marching-ants self marker and locks it for peers).
        ;; formula bar shares $v with the floating #editor, so the two stay live-
        ;; synced: typing in either updates $v and the other reflects it.
-       [:input {:id "fbar" :data-bind:v "" :placeholder "value or =formula"
+       [:input {:id "fbar" :class "tool mono" :data-bind:v "" :placeholder "value or =formula"
                 :data-on:focus "$edit=true, @post('/presence')"
                 :data-on:keydown "evt.key==='Enter' && ($cell=$sel, @post('/cell'))"
                 :data-on:blur "$cell=$sel, @post('/cell'), $edit=false, @post('/presence')"
-                :style (str "flex:1;font:13px monospace;padding:5px 8px;border:1px solid #bbb;"
-                            "border-radius:4px;")}]
-       ;; sharing toggle / badge (patched back by POST /share)
-       (h/raw (share-html uid storage-id))
-       ;; who am I + sign out
-       [:span {:style "font:12px sans-serif;color:#444;white-space:nowrap;"}
-        (or (:name (auth/user-info uid)) uid)]
-       [:form {:method "post" :action "/logout" :style "margin:0;"}
-        [:button {:style (str "font:12px sans-serif;padding:5px 8px;border:1px solid #bbb;"
-                              "border-radius:4px;background:#f6f6f6;cursor:pointer;")}
-         "sign out"]]]
+                :style "flex:1;"}]]
       ;; hidden r0/c0 carriers (/app.js sets these then clicks #viewtrigger so
       ;; Datastar @post /view and applies the returned window patch).
       [:input {:id "r0box" :data-bind:r0 "" :style "display:none;"}]
@@ -768,14 +789,11 @@
   [uid sheet-id]
   (let [{:keys [owner public]} (@sheets* sheet-id)
         [_ sname] (store/split-id sheet-id)
-        url (str (auth/base-url) "/?u=" owner "&s=" sname)
-        btn-style (str "font:12px sans-serif;padding:5px 8px;border:1px solid #bbb;"
-                       "border-radius:4px;background:#f6f6f6;cursor:pointer;")]
+        url (str (auth/base-url) "/?u=" owner "&s=" sname)]
     (str (h/html
           [:div {:id "sharebar" :style "display:flex;align-items:center;gap:.4rem;"}
            (if (= uid owner)
-             [:button {:data-on:click "@post('/share')" :title "toggle sharing"
-                       :style btn-style}
+             [:button {:class "btn" :data-on:click "@post('/share')" :title "toggle sharing"}
               (if public "🌐 shared" "🔒 private")]
              [:span {:style "font:12px sans-serif;color:#666;"}
               (str "🌐 shared by " (or (:name (auth/user-info owner)) owner))])
@@ -800,10 +818,10 @@
   (with-owner req
     (fn [uid sheet-id _rec {:keys [sid]} gen]
       (ensure-session! sid sheet-id uid)
-      (let [public? (get-in (swap! sheets* update-in [sheet-id :public] not)
-                            [sheet-id :public])]
+      (let [now-public? (db/set-public! sheet-id (not (db/public? sheet-id)))]
+        (swap! sheets* assoc-in [sheet-id :public] now-public?)
         (save-rec! sheet-id)
-        (when-not public?            ; just went public -> private
+        (when-not now-public?        ; just went public -> private
           (evict-foreign! sheet-id uid))
         (d*/patch-elements! gen (share-html uid sheet-id))))))
 

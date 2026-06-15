@@ -154,3 +154,79 @@
 (defn delete-token! [token-hash]
   (when-let [eid (d/q '[:find ?t . :in $ ?h :where [?t :token/hash ?h]] @(conn) token-hash)]
     (d/transact (conn) [[:db/retractEntity eid]])))
+
+;; --- sheets + shares ------------------------------------------------------
+;; Sheet metadata + an ACL of share grants live here; the CELL data stays in
+;; the file store. A grant is (sheet, grantee, grantee-kind, level): an
+;; `:everyone` grant is the old "public" flag, a `:user` grant is a direct
+;; share to one uid. The owner is NOT represented as a grant — ownership is
+;; derived from the `<owner>__<name>` storage id (see `store/split-id`).
+
+(defn ensure-sheet!
+  "Idempotently register a sheet entity. Returns true iff it was newly created
+   (first registration) — the caller uses that to run a one-shot migration of
+   the file's legacy :public flag into a grant. `owner-uid`/`name` seed the
+   metadata; the owner ref is set only when that user already exists."
+  [sheet-id owner-uid name]
+  (if (d/q '[:find ?e . :in $ ?id :where [?e :sheet/id ?id]] @(conn) sheet-id)
+    false
+    (let [owner? (some? (user-info owner-uid))
+          tx (cond-> {:sheet/id sheet-id :sheet/created-at (now)}
+               name   (assoc :sheet/name name)
+               owner? (assoc :sheet/owner [:user/uid owner-uid]))]
+      (d/transact (conn) [tx])
+      true)))
+
+(defn sheet-grants
+  "All share rows on `sheet-id` as maps {:grantee :kind :level}. Drives both the
+   access check and (later) the share panel."
+  [sheet-id]
+  (->> (d/q '[:find ?grantee ?kind ?level
+              :in $ ?sid
+              :where [?sh :sheet/id ?sid] [?s :share/sheet ?sh]
+                     [?s :share/grantee ?grantee]
+                     [?s :share/grantee-kind ?kind]
+                     [?s :share/level ?level]]
+            @(conn) sheet-id)
+       (map (fn [[grantee kind level]] {:grantee grantee :kind kind :level level}))))
+
+(defn access-level
+  "Highest grant level `uid` holds on `sheet-id` via shares (NOT ownership):
+   :read-write | :read | nil. Considers :everyone grants and :user grants for
+   this uid."
+  [uid sheet-id]
+  (let [levels (for [{:keys [grantee kind level]} (sheet-grants sheet-id)
+                     :when (or (= kind :everyone)
+                               (and (= kind :user) (= grantee uid)))]
+                 level)]
+    (cond (some #{:read-write} levels) :read-write
+          (some #{:read} levels)       :read
+          :else                        nil)))
+
+(defn public?
+  "True iff `sheet-id` has an :everyone grant (any level)."
+  [sheet-id]
+  (boolean (some #(= :everyone (:kind %)) (sheet-grants sheet-id))))
+
+(defn- everyone-eid [sheet-id]
+  (d/q '[:find ?s . :in $ ?sid
+         :where [?sh :sheet/id ?sid] [?s :share/sheet ?sh]
+                [?s :share/grantee-kind :everyone]]
+       @(conn) sheet-id))
+
+(defn set-public!
+  "Add (on? true) or remove (on? false) the public :everyone/:read-write grant
+   on `sheet-id`. Idempotent. Returns the resulting boolean state. Requires the
+   sheet entity to exist (call `ensure-sheet!` first)."
+  [sheet-id on?]
+  (let [eid (everyone-eid sheet-id)]
+    (cond
+      (and on? (not eid))
+      (d/transact (conn) [{:share/sheet [:sheet/id sheet-id]
+                           :share/grantee "*"
+                           :share/grantee-kind :everyone
+                           :share/level :read-write
+                           :share/created-at (now)}])
+      (and (not on?) eid)
+      (d/transact (conn) [[:db/retractEntity eid]]))
+    (boolean on?)))
