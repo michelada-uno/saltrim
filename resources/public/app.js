@@ -254,13 +254,43 @@ function initSession() {
   openStream();
   initScroll();
 
-  window.addEventListener('pagehide', function () {
-    try {
-      navigator.sendBeacon('/session/end',
-        new Blob([JSON.stringify({sid: sid})], {type: 'application/json'}));
-    } catch (e) {}
-  });
+  // pagehide is a backstop; the reliable signal is visibilitychange (below).
+  window.addEventListener('pagehide', function () { window.__unloading = true; leaveSession(); });
 }
+
+// Release the session via the beacon — reliable even as the tab closes (no body
+// to read back, survives unload). Server reaps the session and pushes the
+// updated #peers to everyone else, so our marker disappears immediately.
+function leaveSession() {
+  const sid = window.__sid;
+  if (!sid) return;
+  try {
+    navigator.sendBeacon('/session/end',
+      new Blob([JSON.stringify({sid: sid})], {type: 'application/json'}));
+  } catch (e) {}
+}
+
+function rejoinSession() {
+  if (!window.__sid) return;
+  window.__left = false;
+  openStream();                       // server re-registers the session
+  // re-assert our cursor so peers see us again without waiting for a move
+  const t = document.getElementById('selecttrigger');
+  if (t) t.click();
+}
+
+// Presence accuracy: pagehide/unload are unreliable (Safari, Firefox, mobile,
+// bfcache), so a closed tab's marker can linger on peers' screens. The one
+// event that DOES fire reliably on close is visibilitychange -> hidden. Treat
+// "hidden" as "left" (beacon out, suppress reconnect) and rejoin on return.
+document.addEventListener('visibilitychange', function () {
+  if (document.visibilityState === 'hidden') {
+    window.__left = true;
+    leaveSession();
+  } else if (window.__left) {
+    rejoinSession();
+  }
+});
 // --- collaboration stream open + reconnect ---------------------------------
 // Datastar's @get SSE does not reconnect indefinitely on its own. Re-open the
 // stream (server registers the session + re-stores its push generator) whenever
@@ -269,13 +299,13 @@ let _streamTimer = null;
 let _streamAttempt = 0;
 
 function openStream() {
-  if (window.__unloading) return;
+  if (window.__unloading || window.__left) return;
   const trig = document.getElementById('streamtrigger');
   if (trig) trig.click();
 }
 
 function scheduleReopen() {
-  if (window.__unloading || _streamTimer) return;
+  if (window.__unloading || window.__left || _streamTimer) return;
   _streamAttempt += 1;
   const delay = Math.min(30000, 1000 * Math.pow(2, _streamAttempt)); // 2s,4s,...,30s
   _streamTimer = setTimeout(function () { _streamTimer = null; openStream(); }, delay);
