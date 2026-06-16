@@ -318,6 +318,12 @@ function initScroll() {
   document.addEventListener('keydown', onKey);
   initEditor();
   initResize();
+  // #meta carries the geometry (base index, totals, axis-size overrides). The
+  // server morphs it in place on every /view AND /size — including a /size
+  // broadcast pushed to a COLLABORATOR's stream. Re-render on any of its
+  // attribute changes so resizes (and scrolls) apply live for everyone.
+  const m = $('meta');
+  if (m) new MutationObserver(function () { render(); }).observe(m, {attributes: true});
   render();  // page already rendered the window at (0,0)
 }
 
@@ -395,9 +401,8 @@ function scheduleReopen() {
 
 document.addEventListener('datastar-fetch', function (e) {
   const d = e.detail || {};
-  // a /view fetch just applied a new window (#meta cb/rb + #cells): realign the
-  // transform to the new content base.
-  if (d.el && d.el.id === 'viewtrigger' && d.type === 'finished') { render(); return; }
+  // (geometry re-render is handled by the #meta MutationObserver in initScroll,
+  // which also covers /size broadcasts on a collaborator's stream.)
   if (!d.el || d.el.id !== 'streamtrigger') return;
   // 'started' = connected (reset backoff). Reopen on a clean end ('finished')
   // or after Datastar exhausts its own retries ('retries-failed'); ignore plain
