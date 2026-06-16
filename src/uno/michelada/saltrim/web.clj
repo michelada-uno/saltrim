@@ -582,12 +582,13 @@
                                    storage-id (or link-token ""))
              :style "font-family:sans-serif;margin:0;padding:.6rem;"}
       ;; hidden input carrying the session id into $sid, and a hidden trigger
-      ;; /app.js clicks to open the persistent collaboration stream via Datastar
-      ;; (so pushed patches are applied). $sid/$sheet go in the URL.
-      [:input {:id "sidbox" :data-bind:sid "" :style "display:none;"}]
-      [:button {:id "streamtrigger"
-                :data-on:click "@get('/stream?sid='+$sid+'&s='+$sheet+'&t='+$link)"
-                :style "display:none;"} ""]
+      ;; #sidbox carries the session id into $sid for the POST handlers. The
+      ;; collaboration stream is opened by /app.js as a NATIVE EventSource (not
+      ;; Datastar's @get): Datastar streams over fetch, and WebKit/Safari buffers
+      ;; a fetch response body, so pushed patches arrived late or never. The sheet
+      ;; id + link token ride here for /app.js to build the EventSource URL.
+      [:input {:id "sidbox" :data-bind:sid "" :data-sheet storage-id :data-link (or link-token "")
+               :style "display:none;"}]
       [:div {:id "toast" :data-show "$err != ''" :data-text "$err"
              :data-on:click "$err=''"
              :style (str "position:fixed;top:1rem;right:1rem;max-width:26rem;background:#c0392b;"
@@ -804,7 +805,12 @@
     (patch-inner! gen "#cells"   (cells-html sh cis ris))
     (patch-inner! gen "#colhead" (colhead-html sh cis))
     (patch-inner! gen "#rowhead" (rowhead-html sh ris))
-    (d*/patch-elements! gen (meta-html sh (:r0 view) (:c0 view)))   ; #meta by id
+    ;; explicit selector + outer mode: the selector-less form (Datastar resolves
+    ;; the target by getElementById) does NOT apply from the persistent stream in
+    ;; WebKit/Safari even once delivered, so a peer's geometry stayed one resize
+    ;; behind. Selector-based patches apply reliably (same as the patch-inner!s).
+    (d*/patch-elements! gen (meta-html sh (:r0 view) (:c0 view))
+                        {d*/selector "#meta" d*/patch-mode d*/pm-outer})
     (patch-inner! gen "#self"  (self-html sid sheet-id))
     (patch-inner! gen "#peers" (peers-html sid sheet-id))))
 

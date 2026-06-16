@@ -329,8 +329,8 @@ function initScroll() {
 }
 
 // Session lifecycle. Generate a session id, push it into $sid (via the hidden
-// bound input so Datastar posts carry it), register on load, and release on
-// page unload with navigator.sendBeacon — reliable even as the tab closes.
+// bound input so Datastar posts carry it), open the collaboration stream, and
+// release on page unload with navigator.sendBeacon — reliable even on close.
 function initSession() {
   if (window.__sid) return;
   const sid = (crypto.randomUUID ? crypto.randomUUID()
@@ -338,12 +338,8 @@ function initSession() {
   window.__sid = sid;
   const box = document.getElementById('sidbox');
   if (box) { box.value = sid; box.dispatchEvent(new Event('input', {bubbles: true})); }
-  // open the persistent collaboration stream via Datastar (it processes the
-  // pushed patches); $sid is now set so the trigger's URL picks it up.
   openStream();
   initScroll();
-
-  // pagehide is a backstop; the reliable signal is visibilitychange (below).
   window.addEventListener('pagehide', function () { window.__unloading = true; leaveSession(); });
 }
 
@@ -353,6 +349,7 @@ function initSession() {
 function leaveSession() {
   const sid = window.__sid;
   if (!sid) return;
+  if (_es) { try { _es.close(); } catch (e) {} _es = null; }
   try {
     navigator.sendBeacon('/session/end',
       new Blob([JSON.stringify({sid: sid})], {type: 'application/json'}));
@@ -380,37 +377,59 @@ document.addEventListener('visibilitychange', function () {
     rejoinSession();
   }
 });
-// --- collaboration stream open + reconnect ---------------------------------
-// Datastar's @get SSE does not reconnect indefinitely on its own. Re-open the
-// stream (server registers the session + re-stores its push generator) whenever
-// it ends or its retries are exhausted, with capped backoff. No heartbeat.
-let _streamTimer = null;
-let _streamAttempt = 0;
+
+// --- collaboration stream (native EventSource) -----------------------------
+// The persistent stream is a NATIVE EventSource, not Datastar's @get. Datastar
+// streams over fetch, and WebKit/Safari buffers a fetch response body — so
+// pushed patches arrived an action late, or never (the last push had nothing to
+// shove it out). EventSource is purpose-built for SSE and delivers incrementally
+// in every browser, and reconnects on its own (server re-registers on /stream
+// open), so no manual backoff. We apply the patch-elements events ourselves;
+// the server's own /post responses still go through Datastar (they close, which
+// flushes, so they were never affected).
+let _es = null;
+
+function applyPatch(data) {
+  // SSE data lines: optional "selector …" / "mode …" then "elements <html>"
+  // (html may span further lines). Our HTML is single-line, but handle wraps.
+  let selector = null, mode = 'outer', html = null;
+  for (const ln of data.split('\n')) {
+    if (html !== null) { html += '\n' + ln; }
+    else if (ln.startsWith('selector ')) { selector = ln.slice(9); }
+    else if (ln.startsWith('mode ')) { mode = ln.slice(5); }
+    else if (ln.startsWith('elements ')) { html = ln.slice(9); }
+  }
+  if (html === null) return;
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html.trim();
+  const src = tpl.content.firstElementChild;
+  const target = selector ? document.querySelector(selector)
+                          : (src && document.getElementById(src.id));
+  if (!target || !src) return;
+  if (mode === 'inner') {
+    target.replaceChildren(...tpl.content.childNodes);
+  } else {
+    // outer: morph attributes IN PLACE (keeps node identity, so the #meta
+    // MutationObserver keeps firing) and sync inner content.
+    for (const a of [...target.attributes]) if (!src.hasAttribute(a.name)) target.removeAttribute(a.name);
+    for (const a of src.attributes) target.setAttribute(a.name, a.value);
+    if (target.innerHTML !== src.innerHTML) target.innerHTML = src.innerHTML;
+  }
+  render();
+}
 
 function openStream() {
   if (window.__unloading || window.__left) return;
-  const trig = document.getElementById('streamtrigger');
-  if (trig) trig.click();
+  if (_es) { try { _es.close(); } catch (e) {} }
+  const box = $('sidbox');
+  const url = '/stream?sid=' + encodeURIComponent(window.__sid)
+            + '&s=' + encodeURIComponent(box.dataset.sheet)
+            + '&t=' + encodeURIComponent(box.dataset.link || '');
+  const es = new EventSource(url);
+  es.addEventListener('datastar-patch-elements', function (e) { applyPatch(e.data); });
+  // datastar-patch-signals on the stream are just the open ack / non-essential.
+  _es = es;
 }
-
-function scheduleReopen() {
-  if (window.__unloading || window.__left || _streamTimer) return;
-  _streamAttempt += 1;
-  const delay = Math.min(30000, 1000 * Math.pow(2, _streamAttempt)); // 2s,4s,...,30s
-  _streamTimer = setTimeout(function () { _streamTimer = null; openStream(); }, delay);
-}
-
-document.addEventListener('datastar-fetch', function (e) {
-  const d = e.detail || {};
-  // (geometry re-render is handled by the #meta MutationObserver in initScroll,
-  // which also covers /size broadcasts on a collaborator's stream.)
-  if (!d.el || d.el.id !== 'streamtrigger') return;
-  // 'started' = connected (reset backoff). Reopen on a clean end ('finished')
-  // or after Datastar exhausts its own retries ('retries-failed'); ignore plain
-  // 'error' so we don't race Datastar's built-in retry into duplicate streams.
-  if (d.type === 'started') { _streamAttempt = 0; }
-  else if (d.type === 'finished' || d.type === 'retries-failed') { scheduleReopen(); }
-});
 window.addEventListener('pagehide', function () { window.__unloading = true; });
 
 // fire after Datastar is ready so the $sid signal binding is live
