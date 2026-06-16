@@ -627,20 +627,18 @@
                 :data-on:blur "$cell=$sel, @post('/cell'), $edit=false, @post('/presence')"
                 :style "flex:1;"}]]
       ;; ── toolbar row 3: style of the selected cell ──────────────────────
-      ;; prop dropdown + a literal-or-=formula source, applied to $sel via
-      ;; POST /style. $val is the cell's own value, e.g.
-      ;;   =(if (> $val 100) "tomato" "white")
+      ;; prop dropdown + a literal-or-=formula source, applied to $sel on Enter
+      ;; (like the formula bar — no separate button). $val is the cell's own
+      ;; value, e.g. =(if (> $val 100) "tomato" "white")
       [:div {:class "toolrow"}
        [:select {:id "stylepropbox" :class "tool" :data-bind:styleprop ""
                  :data-on:change "syncStyle($sel)"
                  :title "style / format property of the selected cell"}
         (for [p (concat (keys style-css) value-props)] [:option {:value (name p)} (name p)])]
        [:input {:id "stylesrcbox" :class "tool mono" :data-bind:stylesrc ""
-                :placeholder "color / mask / =formula (use $val)"
+                :placeholder "color / mask / =formula (use $val) — Enter to apply"
                 :data-on:keydown "evt.key==='Enter' && ($cell=$sel, @post('/style'))"
-                :style "flex:1;"}]
-       [:button {:class "btn" :data-on:click "$cell=$sel, @post('/style')"
-                 :title "apply style to the selected cell"} "apply"]]
+                :style "flex:1;"}]]
       ;; hidden r0/c0 carriers (/app.js sets these then clicks #viewtrigger so
       ;; Datastar @post /view and applies the returned window patch).
       [:input {:id "r0box" :data-bind:r0 "" :style "display:none;"}]
