@@ -301,7 +301,8 @@ function initResize() {
     function mu() {
       document.removeEventListener('mousemove', mm); document.removeEventListener('mouseup', mu);
       guide.style.display = 'none';
-      setSig('rzaxis', axis); setSig('rzidx', idx); setSig('rzsize', sz);
+      // one atomic command "axis:idx:size" — no multi-signal partial-update race
+      setSig('rzcmd', axis + ':' + idx + ':' + Math.round(sz));
       const tr = $('sizetrigger'); if (tr) tr.click();
     }
     document.addEventListener('mousemove', mm); document.addEventListener('mouseup', mu);

@@ -577,7 +577,7 @@
      [:body {:data-signals (format (str "{cell:'', v:'', err:'', sel:'', edit:false, r0:0, c0:0, "
                                         "sheet:'%s', sid:'', link:'%s', sharepanel:false, shareact:'', "
                                         "plevel:'', gtarget:'', glevel:'read-write', grantee:'', "
-                                        "styleprop:'bg', stylesrc:'', rzaxis:'', rzidx:0, rzsize:0, "
+                                        "styleprop:'bg', stylesrc:'', rzcmd:'', "
                                         "help:false}")
                                    storage-id (or link-token ""))
              :style "font-family:sans-serif;margin:0;padding:.6rem;"}
@@ -651,12 +651,11 @@
                 :style "display:none;"} ""]
       [:button {:id "celltrigger" :data-on:click "$cell=$sel, @post('/cell')"
                 :style "display:none;"} ""]
-      ;; column/row resize: /app.js fills these from a header grip drag, then
-      ;; clicks #sizetrigger to POST /size. (rzidx/rzsize seeded numeric so
-      ;; Datastar keeps them numbers, not strings.)
-      [:input {:id "rzaxisbox" :data-bind:rzaxis "" :style "display:none;"}]
-      [:input {:id "rzidxbox"  :data-bind:rzidx ""  :style "display:none;"}]
-      [:input {:id "rzsizebox" :data-bind:rzsize "" :style "display:none;"}]
+      ;; column/row resize: /app.js fills ONE atomic command "axis:idx:size" from
+      ;; a header grip drag, then clicks #sizetrigger to POST /size. A single
+      ;; signal (not three) so a stray partial update can't run the wrong axis or
+      ;; send a 0 — the server also validates and ignores anything malformed.
+      [:input {:id "rzcmdbox" :data-bind:rzcmd "" :style "display:none;"}]
       [:button {:id "sizetrigger" :data-on:click "@post('/size')" :style "display:none;"} ""]
       ;; logical-scroll viewport (custom wheel + scrollbars in /app.js)
       (grid-layers sh {:r0 0 :c0 0})]])))
@@ -966,23 +965,29 @@
 
 (defn- handle-size [req]
   (with-access req
-    (fn [uid sheet-id rec {:keys [sid rzaxis rzidx rzsize]} gen]
+    (fn [uid sheet-id rec {:keys [sid rzcmd]} gen]
       (ensure-session! sid sheet-id uid (:token rec))
-      (let [sh (:sh rec)]
-        (if (not= :read-write (:level rec))
+      (let [sh (:sh rec)
+            [axis idx size] (str/split (str rzcmd) #":")
+            i (parse-long (str idx))
+            s (parse-long (str size))]
+        (cond
+          (not= :read-write (:level rec))
           (signals! gen {:err "read-only access — you can't edit this sheet"})
+          ;; ignore stray / malformed commands so a glitch can NEVER wipe a size
+          ;; back to default (sizes only change via a valid positive value here)
+          (not (and (#{"col" "row"} axis) i s (pos? s)))
+          (signals! gen {:err ""})
+          :else
           (locking edit-lock
             (try
-              (let [i (long rzidx)
-                    s (when rzsize (long rzsize))]    ; nil/0 -> reset to default
-                (case (str rzaxis)
-                  "col" (sheet/set-col-width!  sh i s)
-                  "row" (sheet/set-row-height! sh i s)
-                  (throw (ex-info "bad axis" {:axis rzaxis})))
-                (save-rec! sheet-id)
-                ;; positions across the whole window shift -> full re-render
-                (render-window! gen sid sheet-id sh (session-view sid))
-                (broadcast-window! sid sheet-id sh))
+              (case axis
+                "col" (sheet/set-col-width!  sh i s)
+                "row" (sheet/set-row-height! sh i s))
+              (save-rec! sheet-id)
+              ;; positions across the whole window shift -> full re-render
+              (render-window! gen sid sheet-id sh (session-view sid))
+              (broadcast-window! sid sheet-id sh)
               (catch Throwable e
                 (signals! gen {:err (pretty-err (.getMessage e))})))))))))
 
