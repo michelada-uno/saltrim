@@ -12,6 +12,11 @@ Read `SPEC.md` for the technical architecture. This file = how to work here.
   `dev-clorax` → `dev-saltrim` across renames; older collections kept as
   backups). If the MCP tools error, the Qdrant REST API on
   `localhost:6333` works directly (scroll/upsert).
+- **Clojure:** Always use `clojure-mcp` for interactive Clojure development. REPL
+  is Clojure's superpower. If nREPL server isn't active, run it using command 
+  `clojure -M:nrepl --port 7888` background command. Do not use Claude default 
+  code execution and file creation capabilities with Clojure code. Use 
+  `clojure-mcp` instead.
 
 ## Communication style
 
@@ -41,10 +46,11 @@ If the user types `/caveman`, invoke the `caveman` Skill.
   End commit messages with:
   `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
 - One coherent change per commit; write a real body explaining *why*.
-- **Spike risky unknowns first** (there are `spike*.clj` files proving Spindel
-  behavior). Don't build UI on unproven engine assumptions.
+- **Spike risky unknowns first** — as REPL walkthroughs under `spikes/` (eval the
+  forms at a dev REPL; see `spikes/README.md`), not cold-run mains. Don't build
+  UI on unproven engine assumptions.
 - **Test after engine changes**: `clojure -X:test` (must stay green, currently
-  33 tests / 153 assertions; `db`/`auth` suites use the `:memory` Datahike
+  36 tests / 183 assertions; `db`/`auth` suites use the `:memory` Datahike
   backend). Add tests for new engine behavior.
 - **Check `app.js` syntax** after editing: `node --check resources/public/app.js`.
 - Keep `TECHDEBT.md` current — append when you defer something, mark items DONE.
@@ -52,14 +58,31 @@ If the user types `/caveman`, invoke the `caveman` Skill.
 ## Running / testing the app
 
 ```bash
-clojure -M:web         # server on http://localhost:8080  (open ?s=<sheet-id>)
-clojure -X:test        # engine + addr + store suites
-clojure -M:spike       # Step-0 lifecycle spike (and :spike0b, plus spike4.clj)
+clojure -M:nrepl --port 7888  # dev REPL (auto-loads dev/user.clj). Preferred.
+clojure -M:web                # one-shot server on :8080 (open ?s=<sheet-id>)
+clojure -X:test               # engine + addr + store + fmt suites
 node --check resources/public/app.js
 
 clojure -T:build uber             # runnable uberjar -> target/saltrim-<v>.jar
 java -jar target/saltrim-<v>.jar  # run the built artifact (serves :8080)
 ```
+
+**Dev REPL workflow (preferred — use `clojure-mcp` against the running nREPL).**
+The system is `mount`-managed (`uno.michelada.saltrim.system`): states
+`database` → `sweeper` → `http-server`, with timed start/stop logging. From the
+REPL (`dev/user.clj` is auto-loaded):
+
+```clojure
+(start)    ; bring the system up   (logs each step + elapsed ms)
+(stop)     ; take it down
+(restart)  ; stop + start, no code reload
+(reset)    ; stop, reload changed src nses (tools.namespace), start — edit-then-(reset)
+```
+
+Caveat: don't `(require … :reload-all)` with datahike/core.async loaded — it
+reloads core.async's protocols and breaks the executor. `(reset)` is scoped to
+`src/` and is safe; `:reload` (single ns) is fine.
+Spikes are REPL walkthroughs under `spikes/` (eval forms at the REPL).
 
 **Identity store (Datahike).** Users + auth tokens live in Datahike (`db` ns),
 not files. Dev/staging defaults to an H2 file at `data/saltrim-h2`; prod sets

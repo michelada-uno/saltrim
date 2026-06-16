@@ -1,10 +1,11 @@
 (ns uno.michelada.saltrim.auth-test
   (:require [clojure.test :refer [deftest testing is use-fixtures]]
+            [mount.core :as mount]
             [uno.michelada.saltrim.auth :as auth]
             [uno.michelada.saltrim.db :as db]))
 
 ;; Users + tokens live in Datahike; each test runs against a fresh in-memory db.
-(use-fixtures :each (fn [t] (db/init-mem!) (t)))
+(use-fixtures :each (fn [t] (db/start-mem!) (try (t) (finally (mount/stop)))))
 
 (deftest dev-login-and-cookie-roundtrip
   ;; no provider env vars in the test JVM -> dev auth active by default

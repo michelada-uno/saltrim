@@ -23,6 +23,8 @@
             [uno.michelada.saltrim.fmt :as fmt]
             [uno.michelada.saltrim.sheet :as sheet]
             [uno.michelada.saltrim.store :as store]
+            [uno.michelada.saltrim.util :as util :refer [timed]]
+            [mount.core :refer [defstate]]
             [starfederation.datastar.clojure.api :as d*]
             [starfederation.datastar.clojure.adapter.http-kit :as hk])
   (:gen-class))
@@ -216,14 +218,9 @@
       (when (< (long (:last-seen s 0)) cutoff)
         (reap-session! sid)))))
 
-(defonce ^:private sweeper* (atom nil))
-(defn- start-sweeper! []
-  (when-not @sweeper*
-    (let [pool (java.util.concurrent.Executors/newScheduledThreadPool 1)]
-      (reset! sweeper*
-              (.scheduleAtFixedRate
-               pool ^Runnable (fn [] (try (sweep!) (catch Throwable _)))
-               SWEEP-MS SWEEP-MS java.util.concurrent.TimeUnit/MILLISECONDS)))))
+;; The session sweeper IS its mount state: the state value is the scheduled
+;; executor pool; :stop shuts it down. (declared lower, with `server`, once
+;; sweep! is defined.)
 
 (defn- used-max
   "[max-ci max-ri] over non-empty cells (-1 if none)."
@@ -511,6 +508,7 @@
      [:head
       [:meta {:charset "utf-8"}]
       [:title "SaltRim"]
+      [:link {:rel "icon" :type "image/png" :href "/favicon.png"}]
       ;; Cells are display <div class="cell"> (not inputs); the floating editor
       ;; is the single #editor input. Both are absolutely positioned (cells by
       ;; their inline left/top, #editor by app.js) — without this the left/top
@@ -1291,6 +1289,14 @@
                             {:status 200 :headers {"Content-Type" "text/javascript"}
                              :body (slurp r)}
                             {:status 404 :body "no app.js"})
+    ;; both the explicit link (/favicon.png) and the browser's automatic
+    ;; /favicon.ico request (covers pages without the <link>, e.g. login)
+    ([:get "/favicon.png"] [:get "/favicon.ico"])
+    (if-let [r (io/resource "SaltRim-logo.png")]
+      {:status 200 :headers {"Content-Type" "image/png"
+                             "Cache-Control" "max-age=86400"}
+       :body (io/input-stream r)}                         ; binary — not slurp
+      {:status 404 :body "no favicon"})
     [:get "/stream"]         (handle-stream req)
     [:post "/session/end"]   (handle-session-end req)
     ;; dev-only diagnostics: exposed only under the name-only dev provider
@@ -1315,16 +1321,42 @@
     [:post "/share"]      (handle-share req)
     {:status 404 :body "not found"})))
 
-(defonce ^:private server* (atom nil))
+(defn port
+  "HTTP port — SALTRIM_PORT env or 8080."
+  []
+  (or (some-> (System/getenv "SALTRIM_PORT") parse-long) 8080))
 
-(defn start! [& [port]]
-  (when @server* (@server*))
-  (start-sweeper!)                          ; reap idle/orphan sessions
-  (reset! server* (http/run-server #'app {:port (or port 8080)}))
-  (println "SaltRim on http://localhost:" (or port 8080))
-  (println "auth:" (if-let [ps (seq (keys (auth/providers)))]
-                     (str/join ", " (map name ps))
-                     "none configured")
-           (if (auth/dev-auth?) "(+ dev login)" "")))
+(defn- start-sweeper-pool!
+  "A scheduled pool that reaps idle/orphan sessions on an interval."
+  []
+  (doto (java.util.concurrent.Executors/newScheduledThreadPool 1)
+    (.scheduleAtFixedRate ^Runnable (fn [] (try (sweep!) (catch Throwable _)))
+                          SWEEP-MS SWEEP-MS java.util.concurrent.TimeUnit/MILLISECONDS)))
 
-(defn -main [& _] (start!) @(promise))
+;; --- mount states ---------------------------------------------------------
+;; Each state's VALUE is the live resource (no side atoms): `sweeper` is the
+;; scheduled pool, `server` is http-kit's stop-fn. db's `conn` state starts
+;; first (web requires db), so the order is conn → sweeper → server, reversed on
+;; stop. (sessions*/sheets* stay atoms — they're in-memory caches, not lifecycle.)
+
+(defstate sweeper
+  :start (timed "session sweeper" (start-sweeper-pool!))
+  :stop  (timed "session sweeper" (.shutdownNow ^java.util.concurrent.ExecutorService sweeper)))
+
+(defstate server
+  :start (timed (str "http server :" (port))
+                (let [stop (http/run-server #'app {:port (port)})]
+                  (util/log "  serving http://localhost:" (port) "·"
+                            (if-let [ps (seq (keys (auth/providers)))]
+                              (str "auth: " (str/join ", " (map name ps))) "auth: none")
+                            (if (auth/dev-auth?) "(+ dev login)" ""))
+                  stop))
+  ;; http-kit's run-server returns a stop-fn; the live sessions' streams die with
+  ;; it, so drop the cache too.
+  :stop  (timed "http server" (do (server) (reset! sessions* {}))))
+
+;; Lifecycle is owned by the mount `system` ns; -main delegates there (resolved
+;; at runtime to avoid a compile-time cycle, since system requires web).
+(defn -main [& _]
+  ((requiring-resolve 'uno.michelada.saltrim.system/start!))
+  @(promise))

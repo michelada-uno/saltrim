@@ -1,9 +1,10 @@
 (ns uno.michelada.saltrim.db-test
   (:require [clojure.test :refer [deftest testing is use-fixtures]]
+            [mount.core :as mount]
             [uno.michelada.saltrim.db :as db]))
 
-;; Fresh in-memory Datahike per test (SALTRIM_DB_BACKEND-independent).
-(use-fixtures :each (fn [t] (db/init-mem!) (t)))
+;; Fresh in-memory Datahike per test via mount (the `conn` state, mem-substituted).
+(use-fixtures :each (fn [t] (db/start-mem!) (try (t) (finally (mount/stop)))))
 
 (deftest user-upsert-and-lookup
   (is (nil? (db/user-info "gh-1")))

@@ -7,7 +7,7 @@
    - default (dev/staging): H2 file at `data/saltrim-h2`
    - prod: a full JDBC url via SALTRIM_DB_JDBC_URL (YugabyteDB — Postgres-wire,
      served by the com.yugabyte/jdbc-yugabytedb driver)
-   - tests: in-memory (`SALTRIM_DB_BACKEND=mem`, or `init-mem!` directly)
+   - tests: in-memory (`SALTRIM_DB_BACKEND=mem`, or `start-mem!` via mount)
 
    We keep history (`:keep-history? true`) deliberately — `as-of` underpins the
    planned audit/branching features. Tokens are stored as a SHA-256 hash of the
@@ -16,7 +16,8 @@
             [datahike.api :as d]
             [konserve-jdbc.core]                      ; registers the konserve :jdbc store
             [konserve.store :refer [validate-store-config]]
-            [uno.michelada.saltrim.util :as util]))
+            [mount.core :as mount :refer [defstate]]
+            [uno.michelada.saltrim.util :as util :refer [timed]]))
 
 (defn- env [k] (util/env k))
 (defn- now [] (System/currentTimeMillis))
@@ -73,13 +74,14 @@
              :table "saltrim"}
      :schema-flexibility :write :keep-history? true}))
 
-(defonce ^:private conn* (atom nil))
-
 (defn- ensure-schema! [c]
   (when-not (d/q '[:find ?e . :where [?e :db/ident :user/uid]] @c)
     (d/transact c schema)))
 
-(defn- connect! [cfg]
+(defn connect!
+  "Connect a Datahike configuration (creating the database first if needed) and
+   ensure the schema. Returns the connection."
+  [cfg]
   (validate-store-config (:store cfg))
   (when-not (d/database-exists? cfg)
     (d/create-database cfg)
@@ -93,18 +95,27 @@
     (ensure-schema! c)
     c))
 
-(defn conn
-  "The shared Datahike connection (lazily created from `config`)."
+(defn mem-config
+  "A fresh, isolated in-memory config (unique store id) — for tests."
   []
-  (or @conn* (reset! conn* (connect! (config)))))
+  {:store {:backend :memory :id (random-uuid)}
+   :schema-flexibility :write :keep-history? true})
 
-(defn init-mem!
-  "Reset the shared connection to a fresh, isolated in-memory database. For
-   tests — each call gets a unique store id."
+;; The shared Datahike connection IS the mount state — callers use `conn`
+;; directly (deref for the db value: `@conn`). No side atom. Tests start it with
+;; a substituted mem value via mount/start-with (see the test fixtures).
+(defstate conn
+  :start (timed "db connection" (connect! (config)))
+  :stop  (timed "db release" (d/release conn)))
+
+(defn start-mem!
+  "Start ONLY the `conn` state, substituted with a fresh in-memory db. For
+   tests — `(mount/stop)` afterwards releases it. Scoped via mount/only so it
+   never boots the http server even if web is loaded in the same JVM."
   []
-  (let [cfg {:store {:backend :memory :id (random-uuid)}
-             :schema-flexibility :write :keep-history? true}]
-    (reset! conn* (connect! cfg))))
+  (-> (mount/only #{#'conn})
+      (mount/swap {#'conn (connect! (mem-config))})
+      mount/start))
 
 ;; --- users ----------------------------------------------------------------
 
@@ -118,7 +129,7 @@
   "Profile map for `uid`, or nil."
   [uid]
   (->user (d/q '[:find (pull ?e [*]) . :in $ ?uid :where [?e :user/uid ?uid]]
-               @(conn) uid)))
+               @conn uid)))
 
 (defn upsert-user!
   "Create or update a user by uid (created-at set only on first insert)."
@@ -130,7 +141,7 @@
              avatar      (assoc :user/avatar avatar)
              provider    (assoc :user/provider provider)
              (not exists?) (assoc :user/created-at (now)))]
-    (d/transact (conn) [tx])
+    (d/transact conn [tx])
     uid))
 
 ;; --- auth tokens ----------------------------------------------------------
@@ -138,7 +149,7 @@
 (defn put-token!
   "Store an auth token (its hash) for `uid`."
   [token-hash uid]
-  (d/transact (conn) [{:token/hash token-hash
+  (d/transact conn [{:token/hash token-hash
                        :token/user [:user/uid uid]
                        :token/created-at (now)
                        :token/last-seen (now)}])
@@ -150,11 +161,11 @@
   (d/q '[:find ?uid .
          :in $ ?h
          :where [?t :token/hash ?h] [?t :token/user ?u] [?u :user/uid ?uid]]
-       @(conn) token-hash))
+       @conn token-hash))
 
 (defn delete-token! [token-hash]
-  (when-let [eid (d/q '[:find ?t . :in $ ?h :where [?t :token/hash ?h]] @(conn) token-hash)]
-    (d/transact (conn) [[:db/retractEntity eid]])))
+  (when-let [eid (d/q '[:find ?t . :in $ ?h :where [?t :token/hash ?h]] @conn token-hash)]
+    (d/transact conn [[:db/retractEntity eid]])))
 
 ;; --- sheets + shares ------------------------------------------------------
 ;; Sheet metadata + an ACL of share grants live here; the CELL data stays in
@@ -169,13 +180,13 @@
    the file's legacy :public flag into a grant. `owner-uid`/`name` seed the
    metadata; the owner ref is set only when that user already exists."
   [sheet-id owner-uid name]
-  (if (d/q '[:find ?e . :in $ ?id :where [?e :sheet/id ?id]] @(conn) sheet-id)
+  (if (d/q '[:find ?e . :in $ ?id :where [?e :sheet/id ?id]] @conn sheet-id)
     false
     (let [owner? (some? (user-info owner-uid))
           tx (cond-> {:sheet/id sheet-id :sheet/created-at (now)}
                name   (assoc :sheet/name name)
                owner? (assoc :sheet/owner [:user/uid owner-uid]))]
-      (d/transact (conn) [tx])
+      (d/transact conn [tx])
       true)))
 
 (defn sheet-grants
@@ -188,7 +199,7 @@
                      [?s :share/grantee ?grantee]
                      [?s :share/grantee-kind ?kind]
                      [?s :share/level ?level]]
-            @(conn) sheet-id)
+            @conn sheet-id)
        (map (fn [[grantee kind level]] {:grantee grantee :kind kind :level level}))))
 
 (defn access-level
@@ -211,14 +222,14 @@
   (d/q '[:find ?s . :in $ ?sid ?g ?k
          :where [?sh :sheet/id ?sid] [?s :share/sheet ?sh]
                 [?s :share/grantee ?g] [?s :share/grantee-kind ?k]]
-       @(conn) sheet-id grantee kind))
+       @conn sheet-id grantee kind))
 
 (defn grant-level
   "The level (:read | :read-write) of the (grantee, kind) grant on `sheet-id`,
    or nil if there is none."
   [sheet-id grantee kind]
   (when-let [eid (grant-eid sheet-id grantee kind)]
-    (:share/level (d/pull @(conn) [:share/level] eid))))
+    (:share/level (d/pull @conn [:share/level] eid))))
 
 (defn set-share!
   "Create or update the (grantee, kind) grant on `sheet-id` to `level`
@@ -233,7 +244,7 @@
                      :share/level level
                      :share/created-at (now)}
               eid (assoc :db/id eid))]
-    (d/transact (conn) [tx])
+    (d/transact conn [tx])
     level))
 
 (defn remove-share!
@@ -241,7 +252,7 @@
    something was removed."
   [sheet-id grantee kind]
   (when-let [eid (grant-eid sheet-id grantee kind)]
-    (d/transact (conn) [[:db/retractEntity eid]])
+    (d/transact conn [[:db/retractEntity eid]])
     true))
 
 ;; --- capability link ------------------------------------------------------
@@ -253,13 +264,13 @@
   (d/q '[:find ?s . :in $ ?sid
          :where [?sh :sheet/id ?sid] [?s :share/sheet ?sh]
                 [?s :share/grantee-kind :link]]
-       @(conn) sheet-id))
+       @conn sheet-id))
 
 (defn link-grant
   "The sheet's capability-link grant as {:token :level}, or nil if none."
   [sheet-id]
   (when-let [eid (link-eid sheet-id)]
-    (let [m (d/pull @(conn) [:share/grantee :share/level] eid)]
+    (let [m (d/pull @conn [:share/grantee :share/level] eid)]
       {:token (:share/grantee m) :level (:share/level m)})))
 
 (def ^:private link-rng (java.security.SecureRandom.))
@@ -277,11 +288,11 @@
   [sheet-id level]
   (let [eid (link-eid sheet-id)]
     (cond
-      (nil? level) (do (when eid (d/transact (conn) [[:db/retractEntity eid]])) nil)
-      eid          (do (d/transact (conn) [{:db/id eid :share/level level}])
+      (nil? level) (do (when eid (d/transact conn [[:db/retractEntity eid]])) nil)
+      eid          (do (d/transact conn [{:db/id eid :share/level level}])
                        (link-grant sheet-id))
       :else        (let [tok (gen-link-token)]
-                     (d/transact (conn) [{:share/sheet [:sheet/id sheet-id]
+                     (d/transact conn [{:share/sheet [:sheet/id sheet-id]
                                           :share/grantee tok
                                           :share/grantee-kind :link
                                           :share/level level
@@ -297,7 +308,7 @@
     (d/q '[:find ?id . :in $ ?tok
            :where [?s :share/grantee ?tok] [?s :share/grantee-kind :link]
                   [?s :share/sheet ?sh] [?sh :sheet/id ?id]]
-         @(conn) token)))
+         @conn token)))
 
 (defn rotate-link!
   "Mint a NEW token for the existing link grant (invalidating old links), keeping
@@ -305,7 +316,7 @@
   [sheet-id]
   (when-let [eid (link-eid sheet-id)]
     (let [tok (gen-link-token)]
-      (d/transact (conn) [{:db/id eid :share/grantee tok}])
+      (d/transact conn [{:db/id eid :share/grantee tok}])
       (link-grant sheet-id))))
 
 (defn migrate-everyone->link!
@@ -316,9 +327,9 @@
   (when-let [eid (d/q '[:find ?s . :in $ ?sid
                         :where [?sh :sheet/id ?sid] [?s :share/sheet ?sh]
                                [?s :share/grantee-kind :everyone]]
-                      @(conn) sheet-id)]
-    (let [lvl (:share/level (d/pull @(conn) [:share/level] eid))]
-      (d/transact (conn) [[:db/retractEntity eid]])
+                      @conn sheet-id)]
+    (let [lvl (:share/level (d/pull @conn [:share/level] eid))]
+      (d/transact conn [[:db/retractEntity eid]])
       (when-not (link-eid sheet-id)
         (set-link-level! sheet-id lvl)))))
 
@@ -333,7 +344,7 @@
                      [?s :share/level ?level] [?s :share/sheet ?sh]
                      [?sh :sheet/id ?id]
                      [(get-else $ ?sh :sheet/name "") ?name]]
-            @(conn) uid)
+            @conn uid)
        (map (fn [[id name level]] {:sheet-id id :name name :level level}))
        (sort-by :sheet-id)
        vec))
@@ -351,4 +362,4 @@
                     [(clojure.string/lower-case ?em) ?eml]
                     [(= ?eml ?e)]
                     [?u :user/uid ?uid]]
-           @(conn) e))))
+           @conn e))))

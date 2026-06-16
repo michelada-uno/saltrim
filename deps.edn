@@ -38,17 +38,27 @@
         ring/ring-core {:mvn/version "1.12.2"}
         metosin/reitit-ring {:mvn/version "0.7.2"}
         hiccup/hiccup {:mvn/version "2.0.0-RC3"}
-        metosin/jsonista {:mvn/version "0.3.8"}}
+        metosin/jsonista {:mvn/version "0.3.8"}
+
+        ;; Lifecycle: mount manages stateful components (db conn, http server,
+        ;; session sweeper) so the system restarts seamlessly from the REPL.
+        mount/mount {:mvn/version "0.1.21"}}
 
  :aliases
  {:dev {:extra-paths ["dev"]
-        :extra-deps {nrepl/nrepl {:mvn/version "1.3.0"}}}
+        :extra-deps {nrepl/nrepl {:mvn/version "1.3.0"}
+                     org.clojure/tools.namespace {:mvn/version "1.5.0"}}}
 
-  ;; Step 0 spike — prove signal/spin lifecycle on real Spindel.
-  :spike {:main-opts ["-m" "uno.michelada.saltrim.spike"]}
-  :spike0b {:main-opts ["-m" "uno.michelada.saltrim.spike0b"]}
-  :spikesci {:main-opts ["-m" "uno.michelada.saltrim.spikesci"]}
+  ;; Spikes are now REPL walkthroughs under spikes/ (eval at a dev REPL), not
+  ;; cold-run mains — see spikes/README.md.
   :web {:main-opts ["-m" "uno.michelada.saltrim.web"]}
+
+  ;; Dev nREPL: dev/ on the path (auto-loads user.clj -> start/stop/reset) plus
+  ;; tools.namespace for `(reset)`. Run: clojure -M:nrepl --port 7888
+  :nrepl {:extra-paths ["dev"]
+          :extra-deps {nrepl/nrepl {:mvn/version "1.7.0"}
+                       org.clojure/tools.namespace {:mvn/version "1.5.0"}}
+          :main-opts ["-m" "nrepl.cmdline"]}
 
   ;; Build a runnable uberjar (java -jar target/saltrim-<v>.jar).
   :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}}
