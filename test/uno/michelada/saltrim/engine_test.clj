@@ -164,3 +164,31 @@
         (sh/load-document! s2 doc)
         (sh/settle! s2)
         (is (= "tomato" (sh/style-value s2 "A1" :bg)) "reloads + recomputes")))))
+
+(deftest sci-formulas
+  (testing "let with local bindings (impossible under the old whitelist)"
+    (let [s (mk)]
+      (put s "A1" "10") (put s "B1" "20")
+      (put s "C1" "=(let [x #cell A1 y #cell B1] (+ x y (* x 2)))")
+      (is (= 50 (v s "C1")))
+      (put s "A1" "100")
+      (is (= 320 (v s "C1")) "recomputes through the let")))
+  (testing "higher-order: fn literal + map + reduce over a range"
+    (let [s (mk)]
+      (put s "A1" "3") (put s "A2" "4") (put s "A3" "5")
+      (put s "B1" "=(reduce + (map (fn [n] (* n n)) #cells A1:A3))")
+      (is (= 50 (v s "B1")) "9+16+25")))
+  (testing "destructuring binds a range vector"
+    (let [s (mk)]
+      (put s "A1" "7") (put s "B1" "8")
+      (put s "C1" "=(let [[a b] #cells A1:B1] (- b a))")
+      (is (= 1 (v s "C1")))))
+  (testing "abs is available in the sandbox"
+    (let [s (mk)]
+      (put s "A1" "-9")
+      (put s "B1" "=(abs #cell A1)")
+      (is (= 9 (v s "B1")))))
+  (testing "host interop / IO is blocked by the sandbox"
+    (let [s (mk)]
+      (is (thrown? clojure.lang.ExceptionInfo (put s "Z1" "=(slurp \"/etc/passwd\")")))
+      (is (thrown? clojure.lang.ExceptionInfo (put s "Z2" "=(System/exit 0)"))))))
