@@ -26,7 +26,8 @@
             [uno.michelada.saltrim.util :as util :refer [timed]]
             [mount.core :refer [defstate]]
             [starfederation.datastar.clojure.api :as d*]
-            [starfederation.datastar.clojure.adapter.http-kit :as hk])
+            [starfederation.datastar.clojure.adapter.http-kit :as hk]
+            [starfederation.datastar.clojure.adapter.common :as ac])
   (:gen-class))
 
 ;; --- geometry -----------------------------------------------------------
@@ -572,12 +573,12 @@
                 ".peer .peertag{position:absolute;top:-15px;left:-2px;"
                 "font:10px/14px sans-serif;color:#fff;padding:0 4px;"
                 "border-radius:3px 3px 3px 0;white-space:nowrap;}"))]
-      [:script {:type "module" :src "/datastar.js"}]
+      [:script {:type "module" :src "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.2/bundles/datastar.js" #_"/datastar.js"}]
       [:script {:src "/app.js"}]]
      [:body {:data-signals (format (str "{cell:'', v:'', err:'', sel:'', edit:false, r0:0, c0:0, "
                                         "sheet:'%s', sid:'', link:'%s', sharepanel:false, shareact:'', "
                                         "plevel:'', gtarget:'', glevel:'read-write', grantee:'', "
-                                        "styleprop:'bg', stylesrc:'', rzaxis:'', rzidx:0, rzsize:0, "
+                                        "styleprop:'bg', stylesrc:'', rzcmd:'', "
                                         "help:false}")
                                    storage-id (or link-token ""))
              :style "font-family:sans-serif;margin:0;padding:.6rem;"}
@@ -651,23 +652,106 @@
                 :style "display:none;"} ""]
       [:button {:id "celltrigger" :data-on:click "$cell=$sel, @post('/cell')"
                 :style "display:none;"} ""]
-      ;; column/row resize: /app.js fills these from a header grip drag, then
-      ;; clicks #sizetrigger to POST /size. (rzidx/rzsize seeded numeric so
-      ;; Datastar keeps them numbers, not strings.)
-      [:input {:id "rzaxisbox" :data-bind:rzaxis "" :style "display:none;"}]
-      [:input {:id "rzidxbox"  :data-bind:rzidx ""  :style "display:none;"}]
-      [:input {:id "rzsizebox" :data-bind:rzsize "" :style "display:none;"}]
+      ;; column/row resize: /app.js fills ONE atomic command "axis:idx:size" from
+      ;; a header grip drag, then clicks #sizetrigger to POST /size. A single
+      ;; signal (not three) so a stray partial update can't run the wrong axis or
+      ;; send a 0 — the server also validates and ignores anything malformed.
+      [:input {:id "rzcmdbox" :data-bind:rzcmd "" :style "display:none;"}]
       [:button {:id "sizetrigger" :data-on:click "@post('/size')" :style "display:none;"} ""]
       ;; logical-scroll viewport (custom wheel + scrollbars in /app.js)
       (grid-layers sh {:r0 0 :c0 0})]])))
 
 ;; --- SSE (official Datastar SDK) ----------------------------------------
 
+;; Optional SSE tracing: set SALTRIM_SSE_DEBUG=1 to log every server-sent event
+;; (type + a snippet of its data lines) to the console. Implemented as a Datastar
+;; write profile — the SDK's designed seam for this — so it sees every event the
+;; server emits through the SDK, on both the one-shot @post responses and the
+;; persistent /stream. (The raw WebKit flush comment bypasses the SDK, so
+;; `flush-tick!` logs itself.) Off by default = zero overhead.
+(def ^:private sse-debug? (some? (System/getenv "SALTRIM_SSE_DEBUG")))
+
+(def ^:private logging-write-profile
+  (let [build (ac/->build-event-str)]
+    {ac/write! (fn [event-type data-lines opts]
+                 (util/log "SSE →" event-type "·"
+                           (let [s (str/join " | " data-lines)]
+                             (if (> (count s) 240) (str (subs s 0 240) "…") s)))
+                 (build event-type data-lines opts))}))
+
+(defn- sse-opts
+  "Add the SSE-tracing write profile to `->sse-response` opts when SALTRIM_SSE_DEBUG
+   is set; otherwise pass them through unchanged (SDK uses its default profile)."
+  [opts]
+  (cond-> opts sse-debug? (assoc hk/write-profile logging-write-profile)))
+
 (defn- sse
   "One-shot SSE response: open, run f with the generator, close. f does the
    patch-elements!/patch-signals! calls."
   [req f]
-  (hk/->sse-response req {hk/on-open (fn [gen] (f gen) (d*/close-sse! gen))}))
+  (hk/->sse-response req (sse-opts {hk/on-open (fn [gen] (f gen) (d*/close-sse! gen))})))
+
+;; --- Safari/WebKit fetch-stream flush (server-side, WebKit-only) ---------
+;; WebKit delivers a fetch() response body to JS in coalesced lumps and holds
+;; the trailing bytes (below an internal threshold) until a LATER, separate
+;; network write arrives — and drops them for good if nothing does. Datastar's
+;; @get stream reads over fetch(), so a collaboration push to a peer that isn't
+;; followed by more traffic never lands in Safari (verified: trailing edit lost
+;; ~40% of the time, even after seconds). Chromium/Firefox stream incrementally
+;; and are unaffected; the editor's own actions answer over one-shot @post
+;; responses that CLOSE (=flush), so only peer broadcasts are affected.
+;;
+;; Padding the push itself does NOT help — same-instant bytes coalesce into the
+;; same held lump (measured: 16 KB appended still lost 4/6). What reliably
+;; triggers delivery is a *time-separated* follow-up write. So a few ms after a
+;; broadcast to a WebKit peer we send a raw SSE comment (ignored by the client
+;; parser — its colon is at column 0): that extra read cycle flushes the push.
+;; ~30 ms is imperceptible yet reliable (0 lost across 24 edits). It is gated by
+;; User-Agent (only WebKit pays) and coalesced to one pending tick per session,
+;; so idle and non-WebKit streams stay completely silent — this is not a
+;; heartbeat.
+(def ^:private webkit-flush-ms 30)
+
+(defonce ^:private flush-pool
+  (java.util.concurrent.Executors/newSingleThreadScheduledExecutor
+    (reify java.util.concurrent.ThreadFactory
+      (newThread [_ r] (doto (Thread. ^Runnable r "saltrim-webkit-flush")
+                         (.setDaemon true))))))
+
+(defonce ^:private flush-pending (java.util.concurrent.ConcurrentHashMap.))
+
+(defn- webkit-ua?
+  "True for WebKit engines (Safari desktop/iOS, iOS browsers) but not
+   Chrome/Chromium/Edge — i.e. the ones whose fetch() SSE buffering needs the
+   flush tick. iOS Chrome (\"CriOS\", no \"Chrome\") is WebKit and matches."
+  [ua]
+  (let [ua (str ua)]
+    (and (str/includes? ua "AppleWebKit")
+         (not (str/includes? ua "Chrome"))
+         (not (str/includes? ua "Chromium")))))
+
+(defn- flush-tick!
+  "Send a raw SSE comment to sid's stream — a time-separated write that flushes
+   WebKit's held fetch buffer. The colon-at-column-0 line is ignored by the
+   Datastar client parser (no DOM/signal effect). The SDK has no comment
+   primitive, so we write the http-kit channel directly, under the gen's lock."
+  [sid]
+  (when-let [g (:gen (@sessions* sid))]
+    (when sse-debug? (util/log "SSE →" ": flush" "·" sid))
+    (try (d*/lock-sse! g
+           (http/send! (.ch ^starfederation.datastar.clojure.adapter.http_kit.impl.SSEGenerator g)
+                       ": flush\n" false))
+         (catch Throwable _))))
+
+(defn- webkit-flush!
+  "Schedule a flush tick ~webkit-flush-ms after a broadcast to a WebKit peer,
+   coalescing to at most one pending tick per session (so a burst of pushes
+   costs one trailing flush, and idle streams none)."
+  [sid]
+  (when (nil? (.putIfAbsent flush-pending sid Boolean/TRUE))
+    (.schedule flush-pool
+               ^Runnable (fn [] (.remove flush-pending sid) (flush-tick! sid))
+               (long webkit-flush-ms) java.util.concurrent.TimeUnit/MILLISECONDS)))
 
 (defn- patch-inner!
   "Replace inner HTML of `selector` with `html`. Blank `html` (e.g. an empty
@@ -727,6 +811,7 @@
       (let [vis (filter #(in-window? (:view s) %) affected)]
         (when (seq vis)
           (try (d*/lock-sse! (:gen s) (d*/patch-elements! (:gen s) (render-cells sh vis (:view s))))
+               (when (:webkit? s) (webkit-flush! sid))
                (catch Throwable _ (reap-session! sid))))))))
 
 ;; --- presence (collaborator cursors + edit locks) ----------------------
@@ -794,6 +879,7 @@
   (doseq [[sid s] @sessions*]
     (when (and (= sheet-id (:sheet s)) (:gen s))
       (try (d*/lock-sse! (:gen s) (patch-inner! (:gen s) "#peers" (peers-html sid sheet-id)))
+           (when (:webkit? s) (webkit-flush! sid))
            (catch Throwable _ (reap-session! sid))))))
 
 (defn- render-window!
@@ -816,6 +902,7 @@
   (doseq [[sid s] @sessions*]
     (when (and (not= sid editor-sid) (= sheet-id (:sheet s)) (:gen s))
       (try (d*/lock-sse! (:gen s) (render-window! (:gen s) sid sheet-id sh (:view s)))
+           (when (:webkit? s) (webkit-flush! sid))
            (catch Throwable _ (reap-session! sid))))))
 
 (defn- locked-by-other?
@@ -966,23 +1053,29 @@
 
 (defn- handle-size [req]
   (with-access req
-    (fn [uid sheet-id rec {:keys [sid rzaxis rzidx rzsize]} gen]
+    (fn [uid sheet-id rec {:keys [sid rzcmd]} gen]
       (ensure-session! sid sheet-id uid (:token rec))
-      (let [sh (:sh rec)]
-        (if (not= :read-write (:level rec))
+      (let [sh (:sh rec)
+            [axis idx size] (str/split (str rzcmd) #":")
+            i (parse-long (str idx))
+            s (parse-long (str size))]
+        (cond
+          (not= :read-write (:level rec))
           (signals! gen {:err "read-only access — you can't edit this sheet"})
+          ;; ignore stray / malformed commands so a glitch can NEVER wipe a size
+          ;; back to default (sizes only change via a valid positive value here)
+          (not (and (#{"col" "row"} axis) i s (pos? s)))
+          (signals! gen {:err ""})
+          :else
           (locking edit-lock
             (try
-              (let [i (long rzidx)
-                    s (when rzsize (long rzsize))]    ; nil/0 -> reset to default
-                (case (str rzaxis)
-                  "col" (sheet/set-col-width!  sh i s)
-                  "row" (sheet/set-row-height! sh i s)
-                  (throw (ex-info "bad axis" {:axis rzaxis})))
-                (save-rec! sheet-id)
-                ;; positions across the whole window shift -> full re-render
-                (render-window! gen sid sheet-id sh (session-view sid))
-                (broadcast-window! sid sheet-id sh))
+              (case axis
+                "col" (sheet/set-col-width!  sh i s)
+                "row" (sheet/set-row-height! sh i s))
+              (save-rec! sheet-id)
+              ;; positions across the whole window shift -> full re-render
+              (render-window! gen sid sheet-id sh (session-view sid))
+              (broadcast-window! sid sheet-id sh)
               (catch Throwable e
                 (signals! gen {:err (pretty-err (.getMessage e))})))))))))
 
@@ -1022,21 +1115,24 @@
   [req]
   (with-stream-access req
     (fn [uid sid sheet-id token]
-      (hk/->sse-response req
+      (let [webkit? (webkit-ua? (get-in req [:headers "user-agent"]))]
+       (hk/->sse-response req
+        (sse-opts
         {hk/on-open
          (fn [gen]
            (when (and sid (re-matches sid-re sid))
              ;; reconnect: keep the existing session's view/dims, just swap the
              ;; (dead) generator for the new one. fresh connect: register.
              (ensure-session! sid sheet-id uid token)
-             (swap! sessions* update sid assoc :gen gen)
+             ;; note the engine so collaboration pushes get the WebKit flush tick
+             (swap! sessions* update sid assoc :gen gen :webkit? webkit?)
              ;; flush once so the client sees an established, open stream (an SSE
              ;; that sends nothing looks "finished" -> client reconnect storm).
              (try (d*/patch-signals! gen "{}") (catch Throwable _))
              ;; restore this session's own marker (reconnect) and show it the
              ;; cursors already present (and vice versa).
              (try (patch-inner! gen "#self" (self-html sid sheet-id)) (catch Throwable _))
-             (broadcast-presence! sheet-id)))}))))
+             (broadcast-presence! sheet-id)))}))))))
 
 (defn- handle-session-end [req]
   (let [uid (auth/req->uid req)
