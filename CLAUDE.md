@@ -42,8 +42,9 @@ If the user types `/caveman`, invoke the `caveman` Skill.
 - **Verify before claiming.** They dislike hand-waving. Read real source, run
   spikes, test in the browser, show evidence. Don't assert behavior you haven't
   checked.
-- **Prefers clean structure**: no inline JS in HTML (use `/app.js`), no stray
-  top-level forms, single source of truth, separate files.
+- **Prefers clean structure**: no imperative JS in HTML (Datastar attributes +
+  a thin `app.cljs`, bridged by custom events — not hidden trigger buttons), no
+  stray top-level forms, single source of truth, separate files.
 - **Wants extensibility planned now** for near-future features (e.g. style/format
   as reactive properties; the persistence format already leaves room).
 - They sometimes edit files between turns (addr.clj, gitignore, etc.). Respect
@@ -60,20 +61,29 @@ If the user types `/caveman`, invoke the `caveman` Skill.
   forms at a dev REPL; see `spikes/README.md`), not cold-run mains. Don't build
   UI on unproven engine assumptions.
 - **Test after engine changes**: `clojure -X:test` (must stay green, currently
-  36 tests / 183 assertions; `db`/`auth` suites use the `:memory` Datahike
+  37 tests / 190 assertions; `db`/`auth` suites use the `:memory` Datahike
   backend). Add tests for new engine behavior.
-- **Check `app.js` syntax** after editing: `node --check resources/public/app.js`.
+- **The client is ClojureScript** (`src/.../app.cljs`, compiled to
+  `resources/public/app.js`). The dev REPL `(start)` watch-compiles it on save
+  (plain CLJS compiler, no node/npm); for a one-shot use `clojure -T:build cljs`.
+  After a cljs edit, sanity-check the compiled output: `node --check
+  resources/public/app.js`. `app.legacy.js` is the pre-CLJS source, kept for
+  reference only (not served). `addr`/`constants` are `.cljc` — shared verbatim
+  by server and client (one source of truth for addressing + grid geometry).
 - Keep `TECHDEBT.md` current — append when you defer something, mark items DONE.
 
 ## Running / testing the app
 
 ```bash
 clojure -M:nrepl --port 7888  # dev REPL (auto-loads dev/user.clj). Preferred.
+                              # (start) also watch-compiles app.cljs -> app.js
+clojure -T:build cljs         # one-shot :advanced /app.js (needed before -M:web
+                              # on a fresh checkout — app.js is gitignored)
 clojure -M:web                # one-shot server on :8080 (open ?s=<sheet-id>)
 clojure -X:test               # engine + addr + store + fmt suites
 node --check resources/public/app.js
 
-clojure -T:build uber             # runnable uberjar -> target/saltrim-<v>.jar
+clojure -T:build uber             # compiles /app.js then builds a runnable uberjar
 java -jar target/saltrim-<v>.jar  # run the built artifact (serves :8080)
 ```
 
@@ -151,9 +161,11 @@ Gotchas learned the hard way:
 
 ## Datastar / http-kit gotchas — already solved
 
-- We vendor `datastar.js` **1.0.0** locally (CDN/version churn bit us). SSE
+- Datastar is **1.0.2 from the CDN** (`@v1.0.2/bundles/datastar.js`); a matching
+  copy is vendored at `resources/public/datastar.js` (served at `/datastar.js`)
+  as an offline fallback — keep the two in sync if you bump the version. SSE
   events: `datastar-patch-elements` / `datastar-patch-signals`. Attrs use colon
-  syntax (`data-on:click`, `data-bind:x`).
+  syntax (`data-on:click`, `data-bind:x`); the event var in expressions is `evt`.
 - SSE/lifecycle now uses the official SDK (`dev.data-star.clojure/*`).
 - **Never send an empty `patch-elements`.** `d*/patch-elements!` with blank HTML
   emits a `datastar-patch-elements` event with **no `elements` line**; the
@@ -168,8 +180,20 @@ Gotchas learned the hard way:
   `pagehide` + a TTL sweep — **no heartbeat**. Don't reintroduce heartbeats.
 - A persistent SSE that sends nothing looks "finished" to the client → reconnect
   storm. `/stream` flushes an empty signals patch on open to establish it.
-- There is no `data-on:load` plugin in this bundle. `app.js` triggers Datastar
-  actions by clicking hidden buttons after `datastar-ready`.
+- There is no `data-on:load` plugin; run once-on-load via `data-effect` (no
+  signal refs ⇒ fires once), or — as we do for the stream — dispatch a custom
+  event from `app.cljs` to a `data-on:<evt>__window` handler.
+- **No hidden trigger buttons / bound-input boxes** (the old smell). The split:
+  Datastar attributes own all signals + server round-trips (`@post`/`@get`);
+  `app.cljs` owns the imperative work (scroll, editor position, resize, keyboard,
+  the beacon) and bridges to the server **only** by dispatching `sr-*` window
+  CustomEvents that `#ctl`/`#streamer` handlers turn into Datastar actions
+  (reading data off `evt.detail`). So nothing in HTML calls a cljs function ⇒
+  `:advanced` needs zero `^:export`s. Read DOM `dataset` via `aget`/`.getAttribute`
+  in cljs (advanced renames `.-foo`). The persistent `/stream` lives on its own
+  `#streamer` element so its `datastar-fetch` lifecycle is distinguishable from
+  the `@post`s for reconnect. `$sid` is server-seeded (also on `#ctl`'s
+  `data-sid`, which the unload beacon reads).
 
 ## Status / roadmap
 
@@ -188,10 +212,13 @@ broad sharing is the link (the old `:everyone` flag auto-migrates to a link).
 **Cell presentation** (PR #14): reactive per-cell style (`$val`, separate style
 layer, 5 CSS props) + number-format masks (`fmt` ns, `:format` prop) +
 per-column/row sizing (sparse `:cols`/`:rows`, prefix-sum virtualizer, drag to
-resize); in-app help modal + README user guide.
+resize); in-app help modal + README user guide. **Client = ClojureScript**: the
+JS engine is ported to `app.cljs` (plain CLJS compiler, no node), the address +
+geometry code shared as `.cljc`, and the old hidden-trigger UI replaced by a
+Datastar-attribute + custom-event bridge.
 
 **What's next lives in `ROADMAP.md`** (single source). Headline track: formula
 engine → **SCI** (fixes `let`/locals, enables per-sheet namespaces + user fns),
-collapsible-toolbar UI rework, **JS → CLJS**, then multi-selection + cut/copy/
-paste. Cheap wins: dependency-graph view, cell assertions. Boss fight: git-like
+collapsible-toolbar UI rework, **JS → CLJS** (done), then multi-selection +
+cut/copy/paste. Cheap wins: dependency-graph view, cell assertions. Boss fight: git-like
 branching (forces cells → Datahike). See `TECHDEBT.md` for deferred items.

@@ -209,3 +209,21 @@ REMAINING:
 - **Resize re-renders the whole window** (`/size` → `render-window!` +
   `broadcast-window!`). Cheap at current window sizes; if windows grow a lot it
   could push just the affected strips instead.
+
+## ClojureScript client (refactor/use-proper-datastar-attributes)
+
+- **Compiled `resources/public/app.js` is gitignored** (a build artifact). The
+  dev nREPL watch builds it `:simple` on `(start)`; `clojure -T:build cljs` and
+  `uber` build `:advanced`. Footgun: a fresh checkout running bare
+  `clojure -M:web` (e.g. the preview launch config) 404s `app.js` until you run
+  `clojure -T:build cljs` once (or start the nREPL). Documented in CLAUDE.md /
+  README; revisit if it bites.
+- **No CLJS tests yet.** The shared `addr` cljc is covered on the CLJ side; the
+  fix for `(int char)`/`(int \A)` (bit-or in CLJS) is currently guarded only by
+  the `:advanced` compile + browser verification. A tiny cljs test build (or a
+  `clojure -M` cljc round-trip) would lock the CLJS path down.
+- **Datastar is loaded from the CDN (1.0.2)** with a vendored fallback at
+  `/datastar.js`; the two must be bumped together. The earlier "always vendor"
+  rule is relaxed to "CDN + kept-in-sync fallback" per the current preference.
+- **`app.legacy.js`** is the pre-CLJS hand-written engine, kept for reference.
+  Delete once the CLJS port has been in use long enough to trust.

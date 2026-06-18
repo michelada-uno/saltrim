@@ -15,7 +15,20 @@
 ;; Only reload application source — never dev/ (this ns) or test/.
 (tn/set-refresh-dirs "src")
 
-(defn start [] (system/start!))
+;; Compile /app.js from ClojureScript and keep rebuilding it on every save, so a
+;; running dev server always serves a fresh bundle (an edit-then-browser-reload
+;; picks it up — app.js is slurped per request). Starts once on a daemon thread
+;; and survives (reset) (it lives in dev/, outside the refresh dirs). The initial
+;; :simple compile runs in the background; it never blocks system start. Prod
+;; compiles the :advanced bundle in build.clj. See dev/cljs_build.clj.
+(defonce ^:private cljs-watch
+  (delay
+    (doto (Thread. ^Runnable #((requiring-resolve 'cljs-build/watch)) "saltrim-cljs-watch")
+      (.setDaemon true)
+      (.start))
+    :watching))
+
+(defn start [] @cljs-watch (system/start!))
 (defn stop [] (system/stop!))
 (defn restart [] (stop) (start))
 

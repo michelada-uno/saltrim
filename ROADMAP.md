@@ -35,12 +35,16 @@ The toolbar keeps growing (sheet/share, formula bar, style row, soon clipboard�
 Rework into **show/hide sections** (collapsible rows, or a small panel/ribbon
 model) so new tools don't crowd the bar. Foundational for the editing track.
 
-### 4. Client → ClojureScript  *(port while `app.js` is still small)*
-`app.js` is ~430 lines now. Multi-select + clipboard will balloon it. Port to
-**CLJS now**: (a) kills the server/client offset-math duplication (share one
-function), (b) gives us real code to build the heavy interactions in. Doing it
-**before** clipboard/multi-select avoids writing throwaway JS.
-Risk: big-bang refactor — keep behavior identical, verify hard.
+### 4. Client → ClojureScript ✅ SHIPPED *(branch `refactor/use-proper-datastar-attributes`)*
+`app.js` ported to `src/.../app.cljs` (plain CLJS compiler — no node/npm; dev
+watch-compiles on `(start)`, prod builds `:advanced` in `uber`). Addressing +
+grid geometry now live in shared `.cljc` (`addr`, `constants`) so server and
+client share **one** source of truth — killing the offset-math duplication.
+Alongside the port, the UI dropped its hidden-trigger-button smell: Datastar
+attributes own all signals + server round-trips, `app.cljs` owns the imperative
+work, and the two bridge through `sr-*` custom events on `#ctl`/`#streamer`.
+Behavior verified identical (selection, edit, formulas, scroll, keyboard, resize,
+collaboration push, stream stability) on the `:advanced` bundle.
 
 ## Editing track  *(builds on 3 + 4)*
 

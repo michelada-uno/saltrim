@@ -1,4 +1,7 @@
-(ns uno.michelada.saltrim.common)
+(ns uno.michelada.saltrim.constants
+  "Grid geometry shared by the server renderer (web.clj) and the browser
+   logical-scroll engine (app.cljs) — one source of truth so client and server
+   agree on cell sizes, window size, overscan and scrollbar thickness.")
 
 ;; --- geometry -----------------------------------------------------------
 
@@ -19,8 +22,3 @@
 (def BUF-COLS 6)        ; scrollable buffer past used/visible range
 (def BUF-ROWS 30)
 (def BAR 12)            ; custom scrollbar thickness px
-
-;; --- address <-> index helpers ---
-
-(defn col->idx
-  [s])

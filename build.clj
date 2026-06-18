@@ -28,11 +28,27 @@
 
 (defn clean [_] (b/delete {:path "target"}))
 
+(defn cljs
+  "Compile ClojureScript -> resources/public/app.js, :advanced (smallest bundle).
+   Only app.cljs + the shared .cljc reach the browser; the .clj backend never
+   resolves into the cljs graph. Dev rebuilds the :simple bundle instead — see
+   dev/cljs_build.clj."
+  [_]
+  (println "Compiling ClojureScript (:advanced) -> resources/public/app.js")
+  ((requiring-resolve 'cljs.build.api/build)
+   "src"
+   {:output-to     "resources/public/app.js"
+    :output-dir    "target/cljs"
+    :main          'uno.michelada.saltrim.app
+    :optimizations :advanced
+    :pretty-print  false}))
+
 (defn uber
-  "AOT-compile the gen-class main ns and package a standalone uberjar."
+  "Compile /app.js, AOT-compile the gen-class main ns, package a standalone jar."
   [opts]
   (let [{:keys [basis class-dir uber-file version]} (ctx opts)]
     (clean nil)
+    (cljs nil)
     (b/copy-dir {:src-dirs ["src" "resources"] :target-dir class-dir})
     (b/compile-clj {:basis basis :class-dir class-dir :ns-compile [main]})
     (b/uber {:class-dir class-dir

@@ -1,5 +1,6 @@
 /target
 /.cpcache
+/resources/public/app.js
 /.lsp
 .clj-kondo/.cache
 *.log

@@ -98,7 +98,16 @@ other's cursors and edit locks live.
 ```bash
 clojure -M:web        # dev server on http://localhost:8080  (open ?s=<sheet>)
 clojure -X:test       # engine / format / store / auth test suites
+clojure -T:build cljs # compile the ClojureScript client -> resources/public/app.js
+clojure -T:build uber # standalone uberjar (compiles the client first)
 ```
+
+The browser client is **ClojureScript** (`src/.../app.cljs`, compiled with the
+plain CLJS compiler — no node/npm). The compiled `resources/public/app.js` is a
+build artifact (gitignored). The preferred dev loop is the nREPL
+(`clojure -M:nrepl --port 7888` then `(start)`), which watch-compiles `app.js`
+on every save; before a bare `clojure -M:web` on a fresh checkout, run
+`clojure -T:build cljs` once to produce it.
 
 Architecture and engine internals are documented in
 [`SPEC.md`](SPEC.md); contributor conventions and gotchas live in

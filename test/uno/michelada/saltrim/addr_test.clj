@@ -8,8 +8,8 @@
 
 (deftest parse-make
   (is (= {:col "AAB" :row 1234 :ci 703 :ri 1233} (a/parse "AAB1234")))
-  (is (= "A1" (a/make-addr 0 0)))
-  (is (= "AB1234" (a/make-addr 27 1233))))
+  (is (= "A1" (a/make 0 0)))
+  (is (= "AB1234" (a/make 27 1233))))
 
 (deftest valid
   (are [s ok] (= ok (a/valid? s))

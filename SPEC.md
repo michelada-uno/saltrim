@@ -13,14 +13,19 @@ on load. Multiple clients edit one sheet live.
 - http-kit server, reitit not used (hand-rolled `case` router), hiccup2, jsonista.
 - `org.babashka/sci` available (sandbox option) — current formula sandbox is a
   symbol whitelist + `eval`, not SCI (see Formulas).
-- Vendored client: `resources/public/datastar.js` (Datastar **1.0.0**),
-  `resources/public/app.js` (our client engine).
+- Client: **Datastar 1.0.2** (loaded from CDN; a matching copy is vendored at
+  `resources/public/datastar.js` / `/datastar.js` as an offline fallback) +
+  `resources/public/app.js`, **compiled from `src/.../app.cljs`** (plain CLJS
+  compiler, no node/npm — dev watch-compiles on `(start)`, prod `:advanced` in
+  `uber`). `app.legacy.js` is the pre-CLJS source, kept for reference only.
 
 ## Namespaces (`src/uno/michelada/saltrim/`, ns root `uno.michelada.saltrim`)
 
 | ns | role |
 |----|------|
-| `addr` | A1 addressing. `col<->idx`, `parse`, `make`, `range-cells`, `valid?`. Address = letters+digits (`AAB1234`); **no colon** (colon = range separator, `A1:C3`). 0-based `ci/ri` internally. |
+| `addr` (`.cljc`) | A1 addressing. `col<->idx`, `parse`, `make`, `range-cells`, `valid?`. Address = letters+digits (`AAB1234`); **no colon** (colon = range separator, `A1:C3`). 0-based `ci/ri` internally. **Shared by server + client.** |
+| `constants` (`.cljc`) | Grid geometry (cell/gutter/header px, window size, overscan, scrollbar thickness). One source of truth for server renderer + `app.cljs`. |
+| `app` (`.cljs`) | Browser engine: logical-scroll math (custom wheel + scrollbars, sub-cell transforms), editor positioning, column/row resize, keyboard nav, session beacon. Bridges to the server only via `sr-*` window CustomEvents. Compiled to `/app.js`. |
 | `auth` | Identity: OAuth 2.0 code flow (GitHub/Google, providers are data), name-only dev login, auth-token cookies; orchestrates hashing + the user/token registry in `db`. |
 | `db` | Datahike-backed registry (users, auth tokens; sheets+shares next). Backends: H2 dev/staging, YugabyteDB prod (konserve-jdbc fork), `:memory` for tests. |
 | `runtime` | Referenced by compiled formula bodies. `lookup`/`lookup-val` resolve a cell against the **current execution context's metadata** (works on executor threads). |
@@ -197,32 +202,33 @@ that the client `translate`s.
 
 ### Cell interaction & editing
 
-- **Single click = select only** (`data-on:click` → `$sel`, presence cursor). No
-  editing, no lock.
+- **Single click = select only** (`data-on:click` → `$sel` + mirror the cell's
+  value/style into the bars, presence cursor). No editing, no lock — fully
+  declarative.
 - **Edit** opens a single floating `#editor` input over the active cell, on
-  **double-click** (`data-on:dblclick` → `startEdit`) or **Enter** (keyboard).
-  Committed on **Enter / blur / double-click**, cancelled on **Esc**. `app.js`
-  positions/shows/hides it and wires its keydown/blur (real listeners — Datastar
-  `data-on:keydown` proved unreliable on synthetic events; the editor's keydown
-  `stopPropagation`s so the doc-level nav handler doesn't re-open it). The actual
-  posts stay Datastar: hidden `#selecttrigger`/`#edittrigger`/`#celltrigger`
-  buttons (`@post '/presence'` / `'/cell'`); `#editor` is `data-bind:v`.
-- **Keyboard navigation** (`onKey`, document-level): arrows / Tab move `$sel`
-  (scrolling it into view via `ensureVisible`); Enter opens the editor. Ignored
-  while editing or when a toolbar input is focused.
+  **double-click** or **Enter**. `app.cljs` positions it and moves focus in; the
+  rest is declarative — `#editor` is `data-bind:v` (shares `$v` with the formula
+  bar) + `data-show:$edit`; **Enter/blur commit** (`@post '/cell'` then drop the
+  edit lock) and **Esc cancels** live in `data-on:keydown__stop`/`blur` (`__stop`
+  keeps these keys from the doc-level nav handler).
+- **Keyboard navigation** (document-level): arrows / Tab move `$sel` (scrolling
+  it into view); Enter opens the editor. Ignored while any input is focused.
 
-### Client engine (`app.js`)
+### Client engine (`app.cljs`)
 
-- Logical position `SX,SY`. Wheel → translate `#cells/#colstrip/#rowstrip` by
-  `(cb*CW - SX, rb*RH - SY)` for smooth sub-cell scroll; `POST /view` (debounced)
-  only when the top-left index changes; re-align `render()` on the `/view`
-  `datastar-fetch finished` event.
+- Imperative DOM work only: logical position `SX,SY`; wheel → translate
+  `#cells/#colstrip/#rowstrip` by `(cb*CW - SX, rb*RH - SY)` for smooth sub-cell
+  scroll; debounced **`/view`** only when the top-left index changes; re-align on
+  `#meta` mutation (covers a collaborator's pushed scroll/resize too).
 - Custom draggable scrollbars (`#vthumb/#hthumb`) sized from `#meta` totals.
 - `jump(addr)` parses A1, sets `SX/SY`, forces a fetch (no clamp; `/view`'s
   `total-px` extends to cover the target).
-- Triggers Datastar actions by clicking hidden buttons (`#viewtrigger` for
-  `/view`, `#streamtrigger` for `/stream`), setting hidden bound inputs
-  (`#r0box/#c0box/#sidbox`) first — there is no `data-on:load` plugin.
+- **No hidden trigger buttons.** When the server must hear about an imperative
+  action, `app.cljs` dispatches an `sr-*` CustomEvent on `window`; declarative
+  `data-on:sr-*__window` handlers on `#ctl` (and `#streamer` for the stream)
+  turn each into the Datastar action, reading carried data off `evt.detail`.
+  Geometry constants come from the shared `constants` cljc; per-render
+  base/totals from `#meta`. Datasets are read via `aget` (advanced-safe).
 
 ### Endpoints
 
@@ -233,10 +239,12 @@ that the client `translate`s.
   `POST /logout` — identity (see above).
 - `POST /share` — owner-only sharing mutation (`$shareact`: link / rotate /
   grant / revoke); patches `#sharebar`.
-- `GET /app.js`, `GET /datastar.js` — vendored assets.
-- `GET /stream?sid=&s=` — **persistent** per-session SSE (auth + access checked;
-  403 otherwise). Registers the session, stores its generator, flushes once to
-  establish the stream. Stays open.
+- `GET /app.js` (compiled ClojureScript bundle), `GET /datastar.js` (vendored
+  Datastar fallback).
+- `GET /stream` — **persistent** per-session SSE (auth + access checked; 403
+  otherwise). Opened with Datastar `@get` from `#streamer`, so `sid/sheet/link`
+  ride in the request **signals** (not the URL). Registers the session, stores
+  its generator, flushes once to establish the stream. Stays open.
 - `POST /cell` — edit (Datastar `@post`, signals carry `cell/v/sheet/sid`).
   Edits, settles, autosaves, returns the editor's window patch + `$err`, and
   **broadcasts** the change to other sessions on the sheet.
@@ -267,10 +275,11 @@ that the client `translate`s.
   other session on the sheet**, each rendered relative to **that session's**
   viewport, written to its stored generator under `d*/lock-sse!`. A write to a
   dead stream throws → reap that session.
-- Stream reconnect (`app.js`): Datastar `@get` SSE doesn't reconnect forever; on
-  `datastar-fetch` `finished`/`retries-failed` for `#streamtrigger`, reopen with
-  capped backoff (reset on `started`). `/stream` on-open keeps an existing
-  session's view and just swaps in the new generator.
+- Stream reconnect (`app.cljs`): Datastar `@get` SSE doesn't reconnect forever;
+  on `datastar-fetch` `finished`/`retries-failed` **for `#streamer`** (its own
+  element, so distinguishable from the `@post`s) re-dispatch `sr-open` with capped
+  backoff (reset on `started`). `/stream` on-open keeps an existing session's view
+  and just swaps in the new generator.
 
 ### Presence & edit locking
 
@@ -283,12 +292,11 @@ mid-edit). Two absolutely-positioned layers inside `#cellclip`, translated with
   `:cursor` (the cell it is on) and `:editing` (the cell it is actively editing,
   else nil). Presence is posted via Datastar `@post('/presence')` — on cell
   **click** (`$edit=false`, cursor), on **starting an edit** (`$edit=true`, lock,
-  via `#edittrigger`), on **commit/cancel** (`$edit=false`, via `#selecttrigger`),
-  and from the formula
-  bar's `data-on:focus`/`blur`), carrying signals `$sel` and `$edit`. `jump`
-  clicks a hidden `#presencetrigger`. `handle-presence` updates the session, then
-  patches **this** session's `#self` back on the `@post` response and
-  re-broadcasts `#peers` to everyone (`broadcast-presence!`).
+  via the `sr-edit` bridge), on **commit/cancel** (`$edit=false`), and from the
+  formula bar's `data-on:focus`/`blur` — carrying signals `$sel` and `$edit`.
+  Keyboard nav / jump go through the `sr-select` bridge. `handle-presence`
+  updates the session, then patches **this** session's `#self` back on the
+  `@post` response and re-broadcasts `#peers` to everyone (`broadcast-presence!`).
 - **`#self` overlay** (`self-html`), two tiers, rendered from the session's
   `:cursor`/`:editing`, `pointer-events:none` (never blocks typing):
   - selected ("you are here") — a calm `.selfcell` border that persists when

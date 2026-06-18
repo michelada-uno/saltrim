@@ -53,15 +53,26 @@
   ;; cold-run mains — see spikes/README.md.
   :web {:main-opts ["-m" "uno.michelada.saltrim.web"]}
 
+  ;; ClojureScript builds /app.js from src (app.cljs + the shared .cljc) with the
+  ;; plain CLJS compiler — no node/npm. Dev rebuilds the :simple bundle in-process
+  ;; on (start) (see dev/cljs_build.clj + dev/user.clj); the canonical one-shot is
+  ;; `clojure -T:build cljs` (:advanced), which `uber` also runs before packaging.
+
   ;; Dev nREPL: dev/ on the path (auto-loads user.clj -> start/stop/reset) plus
-  ;; tools.namespace for `(reset)`. Run: clojure -M:nrepl --port 7888
+  ;; tools.namespace for `(reset)` and clojurescript for the live /app.js watch.
+  ;; Run: clojure -M:nrepl --port 7888
   :nrepl {:extra-paths ["dev"]
           :extra-deps {nrepl/nrepl {:mvn/version "1.7.0"}
-                       org.clojure/tools.namespace {:mvn/version "1.5.0"}}
+                       org.clojure/tools.namespace {:mvn/version "1.5.0"}
+                       org.clojure/clojurescript {:mvn/version "1.11.132"}}
           :main-opts ["-m" "nrepl.cmdline"]}
 
-  ;; Build a runnable uberjar (java -jar target/saltrim-<v>.jar).
-  :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}}
+  ;; Build a runnable uberjar (java -jar target/saltrim-<v>.jar). Carries
+  ;; clojurescript so `uber` compiles the :advanced /app.js before packaging;
+  ;; `src` is on the path so the cljs compiler resolves the :main namespace.
+  :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}
+                 org.clojure/clojurescript {:mvn/version "1.11.132"}}
+          :extra-paths ["src"]
           :ns-default build}
 
   :test {:extra-paths ["test"]

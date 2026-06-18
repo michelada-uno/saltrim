@@ -132,8 +132,16 @@
 (defn clear-cookie []
   (str cookie-name "=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"))
 
-(defn req->token [req]
-  (some-> req :cookies (get cookie-name) :value))
+(defn req->token
+  "The auth token from the request cookie. Prefers the wrap-cookies-parsed
+   :cookies map (every real request runs through that middleware); falls back to
+   parsing the raw Cookie header so the fn stays usable without the middleware
+   (internal calls, tests)."
+  [req]
+  (or (some-> req :cookies (get cookie-name) :value)
+      (some->> (get-in req [:headers "cookie"])
+               (re-find (re-pattern (str "(?:^|;\\s*)" cookie-name "=([a-f0-9]{64})")))
+               second)))
 
 (defn req->uid
   "The authenticated user id for a request, or nil."
