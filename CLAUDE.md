@@ -125,6 +125,20 @@ attaches it to a GitHub Release. See SPEC.md "Build & release".
 Use the **Claude Preview** MCP tools (`preview_start` with `.claude/launch.json`,
 then `preview_eval`/`preview_screenshot`/`preview_console_logs`/`preview_network`).
 
+**ALWAYS shut down what you start.** A SaltRim server (preview `-M:web`, a dev
+nREPL, an uberjar) holds port 8080 **and file-locks the dev H2 db**
+(`data/saltrim-h2`), so a left-running JVM blocks the user's own runs and forces
+them to `lsof`/`kill` by hand. Before you finish a turn (and before starting a
+fresh server), stop every process you launched and free the ports — never leave
+one running "for convenience":
+
+```bash
+lsof -ti:8080 -ti:7888 | xargs kill -9 2>/dev/null   # free web + nREPL ports
+```
+
+Prefer `preview_stop` for a preview server; the command above is the catch-all.
+If you started a background `clojure`/`java`, kill it explicitly when done.
+
 Gotchas learned the hard way:
 - `preview_start` launches a **fresh JVM**. To pick up `web.clj` edits, restart
   the server. `app.js`/`datastar.js` are slurped per request, so a browser
@@ -141,7 +155,6 @@ Gotchas learned the hard way:
   suspecting the engine.
 - `GET /debug` returns session + loaded-sheet detail (dev only — gate before any
   real deploy).
-- Free the port between runs: `lsof -ti:8080 | xargs kill -9`.
 
 ## Spindel gotchas (the engine) — already solved, don't relearn
 
