@@ -252,6 +252,12 @@
        (let [t (.-target e) cls (.-classList t)
              col? (.contains cls "colgrip") row? (.contains cls "rowgrip")]
          (when (or col? row?)
+           ;; commit any in-progress edit first: the grip mousedown's
+           ;; preventDefault (below) would otherwise BLOCK the editor's blur, so
+           ;; the editor would stay open while /size re-renders the window —
+           ;; leaving the floating editor misaligned with the server-rendered
+           ;; overlay. sr-commit closes it via $edit (no reliance on focus).
+           (emit! "sr-commit")
            (.preventDefault e) (.stopPropagation e)
            (let [m (mta) guide ($ "rzguide") rect (.getBoundingClientRect vp)
                  axis  (if col? "col" "row")

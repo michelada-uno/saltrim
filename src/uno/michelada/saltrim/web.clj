@@ -666,6 +666,9 @@
       [:div {:id "ctl" :data-sid sid :style "display:none;"
              :data-on:sr-view__window "$r0=evt.detail.r0, $c0=evt.detail.c0, @post('/view')"
              :data-on:sr-size__window "$rzcmd=evt.detail.cmd, @post('/size')"
+             ;; commit an in-progress edit (app.cljs fires this before a resize
+             ;; drag, whose preventDefault would otherwise swallow the blur)
+             :data-on:sr-commit__window "$edit && ($cell=$sel, @post('/cell'), $edit=false, @post('/presence'))"
              ;; select: move cursor + mirror the cell's value/style into the bars
              :data-on:sr-select__window
              (str "const c=document.getElementById('c_'+evt.detail.addr);"
