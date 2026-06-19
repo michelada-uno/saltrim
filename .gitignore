@@ -14,3 +14,4 @@ package.json
 package-lock.json
 .emacs.desktop
 .playwright-mcp/
+*.xcf
