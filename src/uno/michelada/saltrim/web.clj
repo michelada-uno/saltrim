@@ -400,12 +400,14 @@
        ;; it over the active cell and moves focus in; everything else is
        ;; declarative: data-bind:v shares $v with the formula bar, data-show
        ;; reveals it on $edit, Enter/blur commit (@post '/cell' + drop the edit
-       ;; lock), Esc cancels. __stop keeps these keys from the document-level nav.
+       ;; lock), Esc cancels. preventDefault is INLINE for Enter/Esc only — a
+       ;; `__prevent` MODIFIER fires on every keydown and would block all typing.
+       ;; `__stop` keeps these keys from the document-level nav handler.
        [:div {:id "editlayer" :style "position:absolute;left:0;top:0;will-change:transform;"}
         [:input {:id "editor" :data-bind:v "" :data-show "$edit"
-                 :data-on:keydown__stop__prevent
-                 (str "evt.key==='Enter' ? ($cell=$sel,@post('/cell'),$edit=false,@post('/presence'))"
-                      " : evt.key==='Escape' ? ($edit=false,@post('/presence')) : null")
+                 :data-on:keydown__stop
+                 (str "evt.key==='Enter' ? (evt.preventDefault(),$cell=$sel,@post('/cell'),$edit=false,@post('/presence'))"
+                      " : evt.key==='Escape' ? (evt.preventDefault(),$edit=false,@post('/presence')) : null")
                  :data-on:blur "$edit && ($cell=$sel,@post('/cell'),$edit=false,@post('/presence'))"
                  :style "display:none;"}]]]
       ;; custom scrollbars
@@ -884,7 +886,9 @@
 (defn- pretty-err [msg]
   (let [m (str msg)]
     (cond
-      (re-find #"cannot be cast" m)    "type error (number expected)"
+      (re-find #"cannot be cast.*?(Number|Long|Double|Integer|Ratio|BigDecimal|BigInt)" m)
+      "type error (number expected)"
+      (re-find #"cannot be cast" m)    "type error"
       (re-find #"Divide by zero" m)    "divide by zero"
       (re-find #"unknown cell" m)      "reference to empty cell"
       (re-find #"disallowed symbol" m) "not allowed in a formula"

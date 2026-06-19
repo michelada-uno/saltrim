@@ -89,6 +89,13 @@
 
 (defn- ld ^java.time.LocalDate [s] (java.time.LocalDate/parse (str s)))
 
+;; SCI's core exposes the print/read family, but its *out*/*in* are unbound, so
+;; calling them crashes with an opaque cast (SciUnbound -> Writer). They're also
+;; meaningless here: a formula is PURE and recomputes reactively (no console, and
+;; it would re-fire on every dependency change). Override them to fail clearly.
+(defn- no-io [& _]
+  (throw (ex-info "I/O isn't available in formulas — the sandbox is pure (no console)" {})))
+
 (defn- mean* [c] (if (seq c) (/ (double (reduce + 0 c)) (count c)) 0))
 (defn- var* [c]
   (let [n (count c)]
@@ -136,7 +143,10 @@
    'year         (fn [s] (.getYear (ld s)))
    'month        (fn [s] (.getMonthValue (ld s)))
    'day          (fn [s] (.getDayOfMonth (ld s)))
-   'days-between (fn [a b] (.between java.time.temporal.ChronoUnit/DAYS (ld a) (ld b)))})
+   'days-between (fn [a b] (.between java.time.temporal.ChronoUnit/DAYS (ld a) (ld b)))
+   ;; I/O (see no-io): clear "not available" instead of an opaque cast crash
+   'println no-io 'print no-io 'prn no-io 'pr no-io 'printf no-io
+   'newline no-io 'flush no-io 'read no-io 'read-line no-io})
 
 (defn new-ctx
   "A fresh per-sheet SCI context: the stdlib merged into clojure.core, then the
