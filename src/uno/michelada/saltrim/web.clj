@@ -406,11 +406,15 @@
        ;; `__prevent` MODIFIER fires on every keydown and would block all typing.
        ;; `__stop` keeps these keys from the document-level nav handler.
        [:div {:id "editlayer" :style "position:absolute;left:0;top:0;will-change:transform;"}
-        [:input {:id "editor" :data-bind:v "" :data-show "$edit"
+        ;; Visibility is $celledit (set ONLY by start-edit!, which also positions +
+        ;; sizes it over the cell) — NOT $edit, which the formula bar also sets for
+        ;; presence/peer-lock. Sharing $edit would pop this box, unpositioned and
+        ;; at its default size, on every formula-bar focus.
+        [:input {:id "editor" :data-bind:v "" :data-show "$celledit"
                  :data-on:keydown__stop
-                 (str "evt.key==='Enter' ? (evt.preventDefault(),$cell=$sel,@post('/cell'),$edit=false,@post('/presence'))"
-                      " : evt.key==='Escape' ? (evt.preventDefault(),$edit=false,@post('/presence')) : null")
-                 :data-on:blur "$edit && ($cell=$sel,@post('/cell'),$edit=false,@post('/presence'))"
+                 (str "evt.key==='Enter' ? (evt.preventDefault(),$cell=$sel,@post('/cell'),$edit=false,$celledit=false,@post('/presence'))"
+                      " : evt.key==='Escape' ? (evt.preventDefault(),$edit=false,$celledit=false,@post('/presence')) : null")
+                 :data-on:blur "$celledit && ($cell=$sel,@post('/cell'),$edit=false,$celledit=false,@post('/presence'))"
                  :style "display:none;"}]]]
       ;; custom scrollbars
       [:div {:id "vbar" :style (format (str "position:absolute;right:0;top:%dpx;bottom:%dpx;width:%dpx;"
@@ -703,6 +707,9 @@
              :data-signals:err "''"
              :data-signals:sel "''"
              :data-signals:edit "false"
+             ;; floating in-cell editor visibility (distinct from $edit: only the
+             ;; cell dblclick/Enter path shows it, after start-edit! positions it)
+             :data-signals:celledit "false"
              :data-signals:r0 "0"
              :data-signals:c0 "0"
              :data-signals:sheet (format "'%s'" storage-id)
@@ -809,18 +816,19 @@
              :data-on:sr-size__window "$rzcmd=evt.detail.cmd, @post('/size')"
              ;; commit an in-progress edit (app.cljs fires this before a resize
              ;; drag, whose preventDefault would otherwise swallow the blur)
-             :data-on:sr-commit__window "$edit && ($cell=$sel, @post('/cell'), $edit=false, @post('/presence'))"
+             :data-on:sr-commit__window "$edit && ($cell=$sel, @post('/cell'), $edit=false, $celledit=false, @post('/presence'))"
              ;; select: move cursor + mirror the cell's value/style into the bars
              :data-on:sr-select__window
              (str "const c=document.getElementById('c_'+evt.detail.addr);"
                   "$sel=evt.detail.addr; $v=c?(c.dataset.raw||''):'';"
                   "$stylesrc=c&&c.dataset.sty?(JSON.parse(c.dataset.sty)[$styleprop]||''):'';"
-                  "$edit=false; @post('/presence')")
-             ;; start editing: load the cell's source into $v + take the edit lock
+                  "$edit=false; $celledit=false; @post('/presence')")
+             ;; start editing in-cell: load the cell's source into $v, take the edit
+             ;; lock, and reveal the floating editor (app.cljs already positioned it)
              :data-on:sr-edit__window
              (str "const c=document.getElementById('c_'+evt.detail.addr);"
                   "$sel=evt.detail.addr; $v=c?(c.dataset.raw||''):'';"
-                  "$edit=true; @post('/presence')")} ""]]]))))
+                  "$edit=true; $celledit=true; @post('/presence')")} ""]]]))))
 
 ;; --- SSE (official Datastar SDK) ----------------------------------------
 
