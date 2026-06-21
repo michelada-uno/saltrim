@@ -78,6 +78,26 @@
                  form0)]
      {:form form :deps (deps form)})))
 
+;; --- reference shifting (clipboard paste) -------------------------------
+
+(defn- shift-addr [a dc dr]
+  (let [{:keys [ci ri]} (addr/parse a)]
+    (addr/make (max 0 (+ ci (long dc))) (max 0 (+ ri (long dr))))))
+
+(defn shift-refs
+  "Shift every cell reference in formula `src` by (dc, dr) cols/rows, clamped at
+   A1 — so clipboard paste is RELATIVE: copy =(+ #cell A1 1) from B1 to B2 pastes
+   =(+ #cell A2 1). Non-formula text (no #cell/#cells markers) is returned as-is;
+   a zero shift is a no-op."
+  [src dc dr]
+  (if (or (nil? src) (and (zero? dc) (zero? dr)))
+    src
+    (-> src
+        (str/replace #"#cells\s+([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
+                     (fn [[_ a b]] (str "#cells " (shift-addr a dc dr) ":" (shift-addr b dc dr))))
+        (str/replace #"#cell\s+([A-Za-z]+[0-9]+)"
+                     (fn [[_ a]] (str "#cell " (shift-addr a dc dr)))))))
+
 ;; --- SCI sandbox + stdlib ----------------------------------------------
 ;; SCI runs the user expression in a curated, side-effect-free subset of
 ;; clojure.core (real lexical scope, NO host interop the user can reach). On top

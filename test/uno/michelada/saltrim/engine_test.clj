@@ -2,6 +2,7 @@
   "Engine behavior, no UI. Values, chains, ranges, errors, structural rebuild."
   (:require [clojure.test :refer [deftest testing is]]
             [uno.michelada.saltrim.constants :as c]
+            [uno.michelada.saltrim.formula :as formula]
             [uno.michelada.saltrim.sheet :as sh]))
 
 (defn- mk [] (sh/create-sheet))
@@ -367,3 +368,18 @@
           r (sh/undo-step s {:undo [] :redo []} :undo)]
       (is (nil? (:affected r)))
       (is (= {:undo [] :redo []} (:stacks r))))))
+
+;; --- clipboard paste: relative reference shifting --------------------------
+
+(deftest shift-refs
+  (testing "non-formula text + zero shift are unchanged"
+    (is (= "5" (formula/shift-refs "5" 3 3)))
+    (is (nil? (formula/shift-refs nil 1 1)))
+    (is (= "=(+ #cell A1 1)" (formula/shift-refs "=(+ #cell A1 1)" 0 0))))
+  (testing "#cell shifts by (dc dr)"
+    (is (= "=(+ #cell B2 1)" (formula/shift-refs "=(+ #cell A1 1)" 1 1)))
+    (is (= "=(+ #cell A2 #cell C4)" (formula/shift-refs "=(+ #cell A1 #cell C3)" 0 1))))
+  (testing "#cells range shifts both corners"
+    (is (= "=(reduce + #cells B1:C2)" (formula/shift-refs "=(reduce + #cells A1:B2)" 1 0))))
+  (testing "refs clamp at A1 (no negative indices)"
+    (is (= "=(+ #cell A1 1)" (formula/shift-refs "=(+ #cell A1 1)" -5 -5)))))

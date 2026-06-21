@@ -24,6 +24,7 @@
             [uno.michelada.saltrim.auth :as auth]
             [uno.michelada.saltrim.db :as db]
             [uno.michelada.saltrim.fmt :as fmt]
+            [uno.michelada.saltrim.formula :as formula]
             [uno.michelada.saltrim.sheet :as sheet]
             [uno.michelada.saltrim.store :as store]
             [uno.michelada.saltrim.util :as util :refer [timed]]
@@ -355,20 +356,11 @@
      [:div {:id "viewport"
             :data-cw CW :data-rh RH :data-gut GUT :data-hdr HDR
             :data-over OVER :data-bar BAR
-            ;; delegated cell handlers. Single click = SELECT only (no edit);
-            ;; double-click = open the floating editor (/app.js). Selection posts
-            ;; presence declaratively (@post '/presence'); the server renders the
-            ;; #self and #peers overlays. Keyboard nav + editor live in /app.js.
-            ;; single click selects (declarative): set $sel, mirror the cell's
-            ;; value + chosen-style source into the bars, drop the edit flag, post
-            ;; the cursor. Double-click to edit is handled in app.cljs (it has to
-            ;; position the floating editor — imperative work).
-            :data-on:click
-            (str "const t=evt.target;"
-                 "t.classList.contains('cell') && "
-                 "($sel=t.id.slice(2), $v=t.dataset.raw||'',"
-                 "$stylesrc=t.dataset.sty?(JSON.parse(t.dataset.sty)[$styleprop]||''):'',"
-                 "$edit=false, @post('/presence'))")
+            ;; Selection (single + range + multi-range), double-click-to-edit and
+            ;; keyboard all live in app.cljs now — it owns the selection state that
+            ;; the #selrange overlay + clipboard read. A plain click still ends up
+            ;; setting $sel + mirroring the cell into the bars + posting presence,
+            ;; via the sr-select bridge; Shift extends a range, Ctrl/⌘ adds one.
             :style "position:relative;height:78vh;border:1px solid #ccc;overflow:hidden;"}
       (h/raw (meta-html sh r0 c0))
       ;; corner
@@ -391,6 +383,11 @@
                                            clip GUT HDR BAR BAR)}
        [:div {:id "cells" :style "position:absolute;left:0;top:0;will-change:transform;"}
         (h/raw (cells-html sh cis ris))]
+       ;; multi-cell selection highlight — drawn CLIENT-side by app.cljs from its
+       ;; selection state (ranges + multi-range), translated with #cells. Local
+       ;; only: peers see your active cell via presence, not the whole marquee.
+       [:div {:id "selrange" :style (str "position:absolute;left:0;top:0;z-index:1;"
+                                         "pointer-events:none;will-change:transform;")}]
        ;; THIS user's own selection / editing marker — server-rendered from the
        ;; session's :cursor/:editing (no per-cell client JS). pointer-events:none
        ;; so it never blocks typing in the cell beneath. Translated with #cells.
@@ -502,6 +499,17 @@
             [:div {:style h3} "Navigation"]
             [:p {:style p} "Click to select · double-click or " [:span {:style kbd} "Enter"]
              " to edit · arrows / " [:span {:style kbd} "Tab"] " to move · the address box jumps to a cell."]
+
+            [:div {:style h3} "Selecting ranges"]
+            [:p {:style p} [:span {:style kbd} "Shift"] "+click or " [:span {:style kbd} "Shift"]
+             "+arrows extends a range · " [:span {:style kbd} "Ctrl/⌘"] "+click adds another range · "
+             [:span {:style kbd} "Delete"] " clears the selected cells (undoable)."]
+
+            [:div {:style h3} "Copy / paste"]
+            [:p {:style p} [:span {:style kbd} "Ctrl/⌘+C"] " copy · " [:span {:style kbd} "Ctrl/⌘+X"]
+             " cut · " [:span {:style kbd} "Ctrl/⌘+V"] " paste at the selected cell. Pasted formulas "
+             "shift their references relative to the move (copy " [:span {:style kbd} "=(+ #cell A1 1)"]
+             " down a row pastes " [:span {:style kbd} "=(+ #cell A2 1)"] ")."]
 
             [:div {:style h3} "Undo / redo"]
             [:p {:style p} [:span {:style kbd} "Ctrl/⌘+Z"] " undoes your last edit · "
@@ -735,6 +743,9 @@
              :data-signals:stylesrc "''"
              ;; collapsible toolbar sections (formula bar stays; others toggle)
              :data-signals:fmtbar "false"
+             ;; current multi-selection as space-separated "TL:BR" ranges (set by
+             ;; app.cljs before a selection-wide action, e.g. Delete -> /clear)
+             :data-signals:selcells "''"
              :data-signals:rzcmd "''"
              ;; definitions library (ƒ modal)
              :data-signals:defspanel "false"
@@ -834,6 +845,12 @@
              ;; per-user undo / redo (Ctrl+Z / Ctrl+Shift+Z|Ctrl+Y from app.cljs)
              :data-on:sr-undo__window "@post('/undo')"
              :data-on:sr-redo__window "@post('/redo')"
+             ;; clear the current selection (Delete/Backspace from app.cljs)
+             :data-on:sr-clear__window "$selcells=evt.detail.ranges, @post('/clear')"
+             ;; clipboard (Ctrl/⌘ C / X / V from app.cljs) — selection rides in $selcells
+             :data-on:sr-copy__window  "$selcells=evt.detail.ranges, @post('/copy')"
+             :data-on:sr-cut__window   "$selcells=evt.detail.ranges, @post('/cut')"
+             :data-on:sr-paste__window "$selcells=evt.detail.ranges, @post('/paste')"
              ;; commit an in-progress edit (app.cljs fires this before a resize
              ;; drag, whose preventDefault would otherwise swallow the blur)
              :data-on:sr-commit__window "$edit && ($cell=$sel, @post('/cell'), $edit=false, $celledit=false, @post('/presence'))"
@@ -1418,6 +1435,136 @@
                 (signals! gen {:err (str cell " " (name prop) " style: "
                                          (pretty-err (.getMessage e)))})))))))))
 
+(defn- selected-cells
+  "All distinct cell addresses across the space-separated \"TL:BR\" ranges in
+   `selcells` (handles multi-range)."
+  [selcells]
+  (->> (str/split (str selcells) #"\s+")
+       (remove str/blank?)
+       (mapcat (fn [r] (let [[a b] (str/split r #":")] (addr/range-cells a (or b a)))))
+       distinct))
+
+(defn- sel-topleft
+  "Top-left [c0 r0] of the bounding box of all selected cells, or nil when empty."
+  [selcells]
+  (let [crs (map (fn [a] (let [{:keys [ci ri]} (addr/parse a)] [ci ri])) (selected-cells selcells))]
+    (when (seq crs) [(apply min (map first crs)) (apply min (map second crs))])))
+
+(defn- handle-clear
+  "Clear every cell in the selection ($selcells = space-separated \"TL:BR\"
+   ranges). Each cleared cell records an undo entry (so Ctrl+Z restores it),
+   then one settle / save / re-render + broadcast."
+  [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [sid selcells]} gen]
+      (ensure-session! sid sheet-id uid (:token rec))
+      (if (not= :read-write (:level rec))
+        (signals! gen {:err "read-only access — you can't edit this sheet"})
+        (let [sh    (:sh rec)
+              cells (selected-cells selcells)]
+          (when (seq cells)
+            (locking edit-lock
+              (try
+                (let [affected (atom [])]
+                  (doseq [c cells]
+                    (when-let [before (sheet/raw sh c)]   ; skip already-empty cells
+                      (swap! affected into (cons c (sheet/dependents* sh c)))
+                      (sheet/set-cell! sh c "")
+                      (record-edit! sid c :value before nil)))
+                  (when (seq @affected)
+                    (sheet/settle! sh)
+                    (save-rec! sheet-id uid)
+                    (push-changes! gen sid sheet-id sh (distinct @affected))))
+                (catch Throwable e
+                  (signals! gen {:err (pretty-err (.getMessage e))}))))))))))
+
+;; --- clipboard (copy / cut / paste) ---------------------------------------
+;; A per-session clipboard ({:origin [c0 r0] :cells [{:dc :dr :value}]}), captured
+;; server-side so it works for off-window ranges. Captures ALL selected cells
+;; (multi-range too), each keyed by its offset from the selection's bounding-box
+;; top-left, so the relative layout is preserved on paste. Value-level; paste
+;; shifts formula refs RELATIVE to the move (see formula/shift-refs). Cut = copy +
+;; clear. (Paste granularity, style/format in the clip and cross-sheet are
+;; follow-ups.)
+
+(defn- capture-clip
+  "Capture all non-empty selected cells, keyed by offset from the selection's
+   bounding-box top-left."
+  [sh selcells]
+  (when-let [[c0 r0] (sel-topleft selcells)]
+    {:origin [c0 r0]
+     :cells  (vec (for [a (selected-cells selcells)
+                        :let [{:keys [ci ri]} (addr/parse a) v (sheet/raw sh a)]
+                        :when v]
+                    {:dc (- ci c0) :dr (- ri r0) :value v}))}))
+
+(defn- handle-copy [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [sid selcells]} gen]
+      (ensure-session! sid sheet-id uid (:token rec))
+      (when-let [clip (capture-clip (:sh rec) selcells)]
+        (swap! sessions* assoc-in [sid :clip] clip))
+      (signals! gen {:err ""}))))                  ; copy is silent (like everywhere)
+
+(defn- paste-cells!
+  "Write `clip` so its top-left lands at (tc,tr): each cell's value, formula refs
+   shifted by the move. Records per-cell undo. Returns the affected addresses."
+  [sh sid clip tc tr]
+  (let [[oc orr] (:origin clip)
+        dc (- tc oc) dr (- tr orr)
+        affected (atom [])]
+    (doseq [{cdc :dc cdr :dr value :value} (:cells clip)
+            :let [a      (addr/make (+ tc cdc) (+ tr cdr))
+                  before (sheet/raw sh a)
+                  src    (if (str/starts-with? (str value) "=")
+                           (formula/shift-refs value dc dr) value)]]
+      (swap! affected into (cons a (sheet/dependents* sh a)))
+      (sheet/set-cell! sh a src)
+      (record-edit! sid a :value before (sheet/raw sh a)))
+    (distinct @affected)))
+
+(defn- handle-paste [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [sid selcells]} gen]
+      (ensure-session! sid sheet-id uid (:token rec))
+      (if (not= :read-write (:level rec))
+        (signals! gen {:err "read-only access — you can't edit this sheet"})
+        (let [sh   (:sh rec)
+              clip (get-in @sessions* [sid :clip])
+              tgt  (sel-topleft selcells)]
+          (when (and clip tgt (seq (:cells clip)))
+            (locking edit-lock
+              (try
+                (let [affected (paste-cells! sh sid clip (first tgt) (second tgt))]
+                  (when (seq affected)
+                    (sheet/settle! sh) (save-rec! sheet-id uid)
+                    (push-changes! gen sid sheet-id sh affected)))
+                (catch Throwable e
+                  (signals! gen {:err (pretty-err (.getMessage e))}))))))))))
+
+(defn- handle-cut [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [sid selcells]} gen]
+      (ensure-session! sid sheet-id uid (:token rec))
+      (if (not= :read-write (:level rec))
+        (signals! gen {:err "read-only access — you can't edit this sheet"})
+        (when-let [clip (capture-clip (:sh rec) selcells)]
+          (let [sh (:sh rec) [c0 r0] (:origin clip)]
+            (swap! sessions* assoc-in [sid :clip] clip)
+            (locking edit-lock
+              (try
+                (let [affected (atom [])]
+                  (doseq [{cdc :dc cdr :dr value :value} (:cells clip)
+                          :let [a (addr/make (+ c0 cdc) (+ r0 cdr))]]
+                    (swap! affected into (cons a (sheet/dependents* sh a)))
+                    (sheet/set-cell! sh a "")
+                    (record-edit! sid a :value value nil))
+                  (when (seq @affected)
+                    (sheet/settle! sh) (save-rec! sheet-id uid)
+                    (push-changes! gen sid sheet-id sh (distinct @affected))))
+                (catch Throwable e
+                  (signals! gen {:err (pretty-err (.getMessage e))}))))))))))
+
 (defn- handle-view [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [r0 c0 sid]} gen]
@@ -1943,6 +2090,10 @@
     [:post "/style"]      (handle-style req)
     [:post "/undo"]       (handle-undo req)
     [:post "/redo"]       (handle-redo req)
+    [:post "/clear"]      (handle-clear req)
+    [:post "/copy"]       (handle-copy req)
+    [:post "/cut"]        (handle-cut req)
+    [:post "/paste"]      (handle-paste req)
     [:post "/size"]       (handle-size req)
     [:post "/props"]      (handle-props req)
     [:post "/deflock"]    (handle-deflock req)
