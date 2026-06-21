@@ -51,11 +51,13 @@ collaboration push, stream stability) on the `:advanced` bundle.
 
 ## Editing track  *(builds on 3 + 4)*
 
-### 5. Multiple selection
-Move from single-cell selection to **ranges + multi-range** (shift / ctrl).
-Defines the target set for styling, clipboard, fills. The server already
-addresses ranges (`#cells`); this is selection state + overlay + hit-testing,
-mostly client.
+### 5. Multiple selection  *(SHIPPED — branch `feat/multi-select`)*
+Ranges + multi-range: **Shift**+click / Shift+arrows extend a rectangle,
+**Ctrl/⌘**+click adds a range. Selection state lives in `app.cljs` (`SEL` =
+vector of `{:a :f}` ranges); the active cell still drives `$sel`/bars/presence,
+the marquee is drawn locally into `#selrange` (peers see only the active cell).
+First consumer: **Delete** clears the selection (`/clear`, per-cell undo entries).
+Next consumers: style-to-selection + the clipboard (#6).
 
 ### 6. Cut / copy / paste
 Clipboard over cells with **granularity**: paste *all*, *values only*,

@@ -355,20 +355,11 @@
      [:div {:id "viewport"
             :data-cw CW :data-rh RH :data-gut GUT :data-hdr HDR
             :data-over OVER :data-bar BAR
-            ;; delegated cell handlers. Single click = SELECT only (no edit);
-            ;; double-click = open the floating editor (/app.js). Selection posts
-            ;; presence declaratively (@post '/presence'); the server renders the
-            ;; #self and #peers overlays. Keyboard nav + editor live in /app.js.
-            ;; single click selects (declarative): set $sel, mirror the cell's
-            ;; value + chosen-style source into the bars, drop the edit flag, post
-            ;; the cursor. Double-click to edit is handled in app.cljs (it has to
-            ;; position the floating editor — imperative work).
-            :data-on:click
-            (str "const t=evt.target;"
-                 "t.classList.contains('cell') && "
-                 "($sel=t.id.slice(2), $v=t.dataset.raw||'',"
-                 "$stylesrc=t.dataset.sty?(JSON.parse(t.dataset.sty)[$styleprop]||''):'',"
-                 "$edit=false, @post('/presence'))")
+            ;; Selection (single + range + multi-range), double-click-to-edit and
+            ;; keyboard all live in app.cljs now — it owns the selection state that
+            ;; the #selrange overlay + clipboard read. A plain click still ends up
+            ;; setting $sel + mirroring the cell into the bars + posting presence,
+            ;; via the sr-select bridge; Shift extends a range, Ctrl/⌘ adds one.
             :style "position:relative;height:78vh;border:1px solid #ccc;overflow:hidden;"}
       (h/raw (meta-html sh r0 c0))
       ;; corner
@@ -391,6 +382,11 @@
                                            clip GUT HDR BAR BAR)}
        [:div {:id "cells" :style "position:absolute;left:0;top:0;will-change:transform;"}
         (h/raw (cells-html sh cis ris))]
+       ;; multi-cell selection highlight — drawn CLIENT-side by app.cljs from its
+       ;; selection state (ranges + multi-range), translated with #cells. Local
+       ;; only: peers see your active cell via presence, not the whole marquee.
+       [:div {:id "selrange" :style (str "position:absolute;left:0;top:0;z-index:1;"
+                                         "pointer-events:none;will-change:transform;")}]
        ;; THIS user's own selection / editing marker — server-rendered from the
        ;; session's :cursor/:editing (no per-cell client JS). pointer-events:none
        ;; so it never blocks typing in the cell beneath. Translated with #cells.
@@ -502,6 +498,11 @@
             [:div {:style h3} "Navigation"]
             [:p {:style p} "Click to select · double-click or " [:span {:style kbd} "Enter"]
              " to edit · arrows / " [:span {:style kbd} "Tab"] " to move · the address box jumps to a cell."]
+
+            [:div {:style h3} "Selecting ranges"]
+            [:p {:style p} [:span {:style kbd} "Shift"] "+click or " [:span {:style kbd} "Shift"]
+             "+arrows extends a range · " [:span {:style kbd} "Ctrl/⌘"] "+click adds another range · "
+             [:span {:style kbd} "Delete"] " clears the selected cells (undoable)."]
 
             [:div {:style h3} "Undo / redo"]
             [:p {:style p} [:span {:style kbd} "Ctrl/⌘+Z"] " undoes your last edit · "
@@ -735,6 +736,9 @@
              :data-signals:stylesrc "''"
              ;; collapsible toolbar sections (formula bar stays; others toggle)
              :data-signals:fmtbar "false"
+             ;; current multi-selection as space-separated "TL:BR" ranges (set by
+             ;; app.cljs before a selection-wide action, e.g. Delete -> /clear)
+             :data-signals:selcells "''"
              :data-signals:rzcmd "''"
              ;; definitions library (ƒ modal)
              :data-signals:defspanel "false"
@@ -834,6 +838,8 @@
              ;; per-user undo / redo (Ctrl+Z / Ctrl+Shift+Z|Ctrl+Y from app.cljs)
              :data-on:sr-undo__window "@post('/undo')"
              :data-on:sr-redo__window "@post('/redo')"
+             ;; clear the current selection (Delete/Backspace from app.cljs)
+             :data-on:sr-clear__window "$selcells=evt.detail.ranges, @post('/clear')"
              ;; commit an in-progress edit (app.cljs fires this before a resize
              ;; drag, whose preventDefault would otherwise swallow the blur)
              :data-on:sr-commit__window "$edit && ($cell=$sel, @post('/cell'), $edit=false, $celledit=false, @post('/presence'))"
@@ -1418,6 +1424,38 @@
                 (signals! gen {:err (str cell " " (name prop) " style: "
                                          (pretty-err (.getMessage e)))})))))))))
 
+(defn- handle-clear
+  "Clear every cell in the selection ($selcells = space-separated \"TL:BR\"
+   ranges). Each cleared cell records an undo entry (so Ctrl+Z restores it),
+   then one settle / save / re-render + broadcast."
+  [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [sid selcells]} gen]
+      (ensure-session! sid sheet-id uid (:token rec))
+      (if (not= :read-write (:level rec))
+        (signals! gen {:err "read-only access — you can't edit this sheet"})
+        (let [sh    (:sh rec)
+              cells (->> (str/split (str selcells) #"\s+")
+                         (remove str/blank?)
+                         (mapcat (fn [r] (let [[a b] (str/split r #":")]
+                                           (addr/range-cells a (or b a)))))
+                         distinct)]
+          (when (seq cells)
+            (locking edit-lock
+              (try
+                (let [affected (atom [])]
+                  (doseq [c cells]
+                    (when-let [before (sheet/raw sh c)]   ; skip already-empty cells
+                      (swap! affected into (cons c (sheet/dependents* sh c)))
+                      (sheet/set-cell! sh c "")
+                      (record-edit! sid c :value before nil)))
+                  (when (seq @affected)
+                    (sheet/settle! sh)
+                    (save-rec! sheet-id uid)
+                    (push-changes! gen sid sheet-id sh (distinct @affected))))
+                (catch Throwable e
+                  (signals! gen {:err (pretty-err (.getMessage e))}))))))))))
+
 (defn- handle-view [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [r0 c0 sid]} gen]
@@ -1943,6 +1981,7 @@
     [:post "/style"]      (handle-style req)
     [:post "/undo"]       (handle-undo req)
     [:post "/redo"]       (handle-redo req)
+    [:post "/clear"]      (handle-clear req)
     [:post "/size"]       (handle-size req)
     [:post "/props"]      (handle-props req)
     [:post "/deflock"]    (handle-deflock req)

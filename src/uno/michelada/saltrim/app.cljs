@@ -14,7 +14,8 @@
    Geometry constants come from the shared cljc (constants), so client and server
    agree on cell sizes. The per-render window base/totals + sparse axis overrides
    ride on #meta's data-* and are read live (they change every /view and /size)."
-  (:require [uno.michelada.saltrim.constants :refer [CW RH]]
+  (:require [clojure.string :as str]
+            [uno.michelada.saltrim.constants :refer [CW RH]]
             [uno.michelada.saltrim.addr :as addr]))
 
 ;; --- tiny DOM + bridge helpers ---------------------------------------------
@@ -41,6 +42,8 @@
 (defonce ^:private last-c0 (atom 0))     ; last window top-left index posted
 (defonce ^:private last-r0 (atom 0))
 (defonce ^:private view-timer (atom nil))
+(defonce ^:private SEL (atom {:ranges []}))  ; multi-selection (see below)
+(declare render-sel!)                         ; defined with the selection section
 
 (defn- mta
   "The rendered window's live geometry from #meta: totals (tw/th), base index
@@ -106,7 +109,7 @@
         tx (- (axis-pos (:cb m) (:dcw m) (:colw m)) @SX)
         ty (- (axis-pos (:rb m) (:drh m) (:rowh m)) @SY)]
     ;; selection/editor/peer overlays + the cell layer all share the transform
-    (doseq [id ["cells" "self" "peers" "editlayer"]] (set-transform! id tx ty))
+    (doseq [id ["cells" "selrange" "self" "peers" "editlayer"]] (set-transform! id tx ty))
     (set-transform! "colstrip" tx 0)
     (set-transform! "rowstrip" 0 ty)
     (thumb! "vbar" "vthumb" @SY (:th m) true)
@@ -192,8 +195,78 @@
     (let [m (mta)]
       (reset! SX (axis-pos (:ci p) (:dcw m) (:colw m)))   ; park at top-left; /view extends totals
       (reset! SY (axis-pos (:ri p) (:drh m) (:rowh m))))
+    (reset! SEL {:ranges [{:a [(:ci p) (:ri p)] :f [(:ci p) (:ri p)]}]})
     (select! (addr/make (:ci p) (:ri p)))
-    (render!) (request-view! true)))
+    (render!) (render-sel!) (request-view! true)))
+
+;; --- multi-selection --------------------------------------------------------
+;; Selection = a vector of ranges, each {:a anchor :f focus} as [ci ri]. The
+;; ACTIVE cell (focus of the last range) drives $sel / formula bar / presence via
+;; the sr-select bridge; the full marquee is drawn locally into #selrange (peers
+;; see only the active cell, not the marquee). Plain click = single, Shift =
+;; extend the last range, Ctrl/⌘ = add a range; Shift+arrows extend; Delete clears.
+
+(defn- rng-norm [{:keys [a f]}]
+  (let [[ac ar] a [fc fr] f]
+    [(js/Math.min ac fc) (js/Math.min ar fr) (js/Math.max ac fc) (js/Math.max ar fr)]))
+
+(defn- sel-active [] (some-> (peek (:ranges @SEL)) :f))
+
+(defn- sel-multi?
+  "More than one cell selected (a >1×1 range or multiple ranges) — when false the
+   server-rendered #self marker already shows the lone active cell, so we draw
+   nothing extra."
+  []
+  (let [rs (:ranges @SEL)]
+    (or (> (count rs) 1)
+        (and (seq rs) (let [[c0 r0 c1 r1] (rng-norm (first rs))] (or (not= c0 c1) (not= r0 r1)))))))
+
+(defn- render-sel! []
+  (when-let [layer ($ "selrange")]
+    (let [m   (mta)
+          cbx (axis-pos (:cb m) (:dcw m) (:colw m))
+          rby (axis-pos (:rb m) (:drh m) (:rowh m))]
+      (set! (.-innerHTML layer)
+            (if-not (sel-multi?) ""
+              (apply str
+                (for [rng (:ranges @SEL)
+                      :let [[c0 r0 c1 r1] (rng-norm rng)
+                            x  (- (axis-pos c0 (:dcw m) (:colw m)) cbx)
+                            y  (- (axis-pos r0 (:drh m) (:rowh m)) rby)
+                            x2 (- (+ (axis-pos c1 (:dcw m) (:colw m)) (axis-size c1 (:dcw m) (:colw m))) cbx)
+                            y2 (- (+ (axis-pos r1 (:drh m) (:rowh m)) (axis-size r1 (:drh m) (:rowh m))) rby)]]
+                  (str "<div style='position:absolute;left:" x "px;top:" y "px;width:" (- x2 x 1)
+                       "px;height:" (- y2 y 1) "px;box-sizing:border-box;"
+                       "background:rgba(47,143,216,.14);border:1px solid var(--accent);'></div>"))))))))
+
+(defn- sel-set! [ranges]
+  (reset! SEL {:ranges ranges})
+  (when-let [[c r] (sel-active)] (select! (addr/make c r)))   ; active -> $sel/bars/presence
+  (render-sel!))
+
+(defn- sel-single! [c r] (sel-set! [{:a [c r] :f [c r]}]))
+(defn- sel-add!    [c r] (sel-set! (conj (:ranges @SEL) {:a [c r] :f [c r]})))
+(defn- sel-extend! [c r]
+  (sel-set! (let [rs (:ranges @SEL)]
+              (if (seq rs) (conj (pop rs) (assoc (peek rs) :f [c r])) [{:a [c r] :f [c r]}]))))
+
+(defn- sel-ranges-str []
+  (str/join " " (for [rng (:ranges @SEL) :let [[c0 r0 c1 r1] (rng-norm rng)]]
+                  (str (addr/make c0 r0) ":" (addr/make c1 r1)))))
+
+(defn- clear-sel! []
+  (when (seq (:ranges @SEL)) (emit! "sr-clear" #js {:ranges (sel-ranges-str)})))
+
+(defn- cell-cr [t]
+  (when (.contains (.-classList t) "cell")
+    (let [p (addr/parse (subs (.-id t) 2))] [(:ci p) (:ri p)])))
+
+(defn- on-cell-click [e]
+  (when-let [[c r] (cell-cr (.-target e))]
+    (cond
+      (.-shiftKey e)                   (sel-extend! c r)
+      (or (.-ctrlKey e) (.-metaKey e)) (sel-add! c r)
+      :else                            (sel-single! c r))))
 
 ;; --- the single floating editor --------------------------------------------
 ;; Cells are display divs; editing happens in one #editor input positioned over
@@ -215,39 +288,42 @@
       (js/setTimeout (fn [] (.focus ed) (.select ed)) 0))))
 
 ;; --- keyboard navigation ----------------------------------------------------
-;; Arrows / Tab move the selection; Enter opens the editor; Ctrl/Cmd+Z undo,
-;; +Shift (or Ctrl/Cmd+Y) redo. Ignored whenever any input is focused (the editor
-;; + toolbar fields own their own keys — incl. native text undo while editing).
+;; Arrows / Tab move the active cell (Shift+arrows EXTEND the range); Enter edits;
+;; Delete/Backspace clears the selection; Ctrl/⌘+Z undo, +Shift (or Ctrl/⌘+Y)
+;; redo. Ignored whenever any input is focused (the editor + toolbar fields own
+;; their own keys — incl. native text undo while editing).
 
 (defn- on-key [e]
   (let [ae  (.-activeElement js/document)
         tag (and ae (.-tagName ae))
         mod (or (.-ctrlKey e) (.-metaKey e))
-        low (.toLowerCase (or (.-key e) ""))]
+        low (.toLowerCase (or (.-key e) ""))
+        k   (.-key e)]
     (when-not (#{"INPUT" "TEXTAREA" "SELECT"} tag)
       (cond
-        ;; per-user undo/redo (the floating editor / toolbar own their own undo)
         (and mod (= low "z")) (do (.preventDefault e) (emit! (if (.-shiftKey e) "sr-redo" "sr-undo")))
         (and mod (= low "y")) (do (.preventDefault e) (emit! "sr-redo"))
+        (#{"Delete" "Backspace"} k) (when (seq (:ranges @SEL)) (.preventDefault e) (clear-sel!))
         :else
-      (let [sel (cur-sel)]
-        (if-not sel
-          (when (#{"ArrowRight" "ArrowLeft" "ArrowUp" "ArrowDown" "Tab" "Enter"} (.-key e))
-            (.preventDefault e) (select! "A1") (ensure-visible! "A1"))
-          (let [p (addr/parse sel) k (.-key e)]
-            (if (= k "Enter")
-              (do (.preventDefault e) (start-edit! sel))
-              (let [ci (:ci p) ri (:ri p)
-                    [ci ri] (case k
-                              "ArrowRight" [(inc ci) ri]
-                              "ArrowLeft"  [(js/Math.max 0 (dec ci)) ri]
-                              "ArrowDown"  [ci (inc ri)]
-                              "ArrowUp"    [ci (js/Math.max 0 (dec ri))]
-                              "Tab"        [(if (.-shiftKey e) (js/Math.max 0 (dec ci)) (inc ci)) ri]
-                              nil)]
-                (when ci
-                  (.preventDefault e)
-                  (let [na (addr/make ci ri)] (select! na) (ensure-visible! na))))))))))))
+        (let [act (sel-active)]
+          (if-not act
+            (when (#{"ArrowRight" "ArrowLeft" "ArrowUp" "ArrowDown" "Tab" "Enter"} k)
+              (.preventDefault e) (sel-single! 0 0) (ensure-visible! "A1"))
+            (let [[ci ri] act]
+              (if (= k "Enter")
+                (do (.preventDefault e) (start-edit! (addr/make ci ri)))
+                (let [[nc nr] (case k
+                                "ArrowRight" [(inc ci) ri]
+                                "ArrowLeft"  [(js/Math.max 0 (dec ci)) ri]
+                                "ArrowDown"  [ci (inc ri)]
+                                "ArrowUp"    [ci (js/Math.max 0 (dec ri))]
+                                "Tab"        [(if (.-shiftKey e) (js/Math.max 0 (dec ci)) (inc ci)) ri]
+                                nil)]
+                  (when nc
+                    (.preventDefault e)
+                    ;; Shift+arrows extend the range; plain arrows / Tab move single
+                    (if (and (.-shiftKey e) (not= k "Tab")) (sel-extend! nc nr) (sel-single! nc nr))
+                    (ensure-visible! (addr/make nc nr))))))))))))
 
 ;; --- column / row resize ----------------------------------------------------
 ;; Header strips render a thin .colgrip/.rowgrip on each trailing edge. Dragging
@@ -357,6 +433,8 @@
 (defn- init []
   (let [vp ($ "viewport") m ($ "meta")]
     (.addEventListener vp "wheel" on-wheel #js {:passive false})
+    ;; click a cell to select (Shift = extend range, Ctrl/⌘ = add range)
+    (.addEventListener vp "click" on-cell-click)
     ;; double-click a cell opens the floating editor over it
     (.addEventListener vp "dblclick"
                        (fn [e] (let [t (.-target e)]
@@ -374,8 +452,10 @@
     ;; #meta is morphed on every /view AND /size (including a collaborator's
     ;; pushed resize) — re-render on any of its attribute changes so geometry
     ;; stays live for everyone.
-    (when m (.observe (js/MutationObserver. render!) m #js {:attributes true}))
-    (render!)                             ; page already rendered the window at (0,0)
+    ;; window geometry changed (scroll/resize by anyone) -> re-translate AND
+    ;; redraw the selection marquee (its rects are window-relative to cb/rb).
+    (when m (.observe (js/MutationObserver. (fn [] (render!) (render-sel!))) m #js {:attributes true}))
+    (render!) (render-sel!)               ; page already rendered the window at (0,0)
     (open-stream!)))                      ; open the collaboration stream
 
 ;; Register load-time listeners now (they only addEventListener); defer the

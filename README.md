@@ -126,6 +126,12 @@ sheet-wide default column width and row height.
 - **Arrows** / **Tab** move the selection; **Esc** cancels an edit.
 - The address box (e.g. `A1`) jumps to a cell.
 
+### Selecting ranges
+
+- **Shift+click** or **Shift+arrows** extends a rectangular range.
+- **Ctrl/⌘+click** adds another range (multi-range selection).
+- **Delete** / **Backspace** clears the selected cells (undoable).
+
 ### Undo / redo
 
 - **Ctrl/⌘+Z** undoes your last edit; **Ctrl/⌘+Shift+Z** (or **Ctrl+Y**) redoes.
