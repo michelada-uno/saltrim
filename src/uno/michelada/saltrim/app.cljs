@@ -215,13 +215,21 @@
       (js/setTimeout (fn [] (.focus ed) (.select ed)) 0))))
 
 ;; --- keyboard navigation ----------------------------------------------------
-;; Arrows / Tab move the selection; Enter opens the editor. Ignored whenever any
-;; input is focused (the editor + toolbar fields own their own keys).
+;; Arrows / Tab move the selection; Enter opens the editor; Ctrl/Cmd+Z undo,
+;; +Shift (or Ctrl/Cmd+Y) redo. Ignored whenever any input is focused (the editor
+;; + toolbar fields own their own keys — incl. native text undo while editing).
 
 (defn- on-key [e]
-  (let [ae (.-activeElement js/document)
-        tag (and ae (.-tagName ae))]
+  (let [ae  (.-activeElement js/document)
+        tag (and ae (.-tagName ae))
+        mod (or (.-ctrlKey e) (.-metaKey e))
+        low (.toLowerCase (or (.-key e) ""))]
     (when-not (#{"INPUT" "TEXTAREA" "SELECT"} tag)
+      (cond
+        ;; per-user undo/redo (the floating editor / toolbar own their own undo)
+        (and mod (= low "z")) (do (.preventDefault e) (emit! (if (.-shiftKey e) "sr-redo" "sr-undo")))
+        (and mod (= low "y")) (do (.preventDefault e) (emit! "sr-redo"))
+        :else
       (let [sel (cur-sel)]
         (if-not sel
           (when (#{"ArrowRight" "ArrowLeft" "ArrowUp" "ArrowDown" "Tab" "Enter"} (.-key e))
@@ -239,7 +247,7 @@
                               nil)]
                 (when ci
                   (.preventDefault e)
-                  (let [na (addr/make ci ri)] (select! na) (ensure-visible! na)))))))))))
+                  (let [na (addr/make ci ri)] (select! na) (ensure-visible! na))))))))))))
 
 ;; --- column / row resize ----------------------------------------------------
 ;; Header strips render a thin .colgrip/.rowgrip on each trailing edge. Dragging

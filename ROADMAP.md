@@ -82,10 +82,14 @@ Keyboard + menu, both.
 - **Git-like sheet branching** — the lifecycle on top of that substrate: a branch
   picker, fork/switch, **merge** (app-level 3-way; define the conflict policy),
   and as-of viewing. Still the biggest remaining piece.
-- **Per-user undo/redo** — local *selective* undo: revert the caller's latest
-  **live** cellprop edit (author = uid, value still theirs) to its history
-  predecessor; superseded edits are no-ops (preserves collaborators' work).
-  Enabled by `:cellprop/author` + history; UI is Ctrl+Z, per-tab stack.
+- **Per-user undo/redo** ✅ SHIPPED *(branch `feat/undo-redo`)* — local
+  *selective* undo: `Ctrl/⌘+Z` / `+Shift` (or `Ctrl+Y`) redo. The selective step
+  is `sheet/undo-step` (skips a prop a collaborator overwrote, so it never
+  clobbers their work); the per-session stack `{:undo :redo}` of
+  `{:addr :prop :before :after}` lives in `web` (per tab), recorded on each
+  value/style edit. Undo is a normal authored write (persisted + broadcast).
+  *(Cross-session/durable undo via `:cellprop/author` + history is a possible
+  future upgrade; the stack is in-memory per session today.)*
 
 ## Polish / governance (fold in opportunistically)
 - date/time format masks; color-picker + toggle controls for styling;

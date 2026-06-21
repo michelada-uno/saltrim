@@ -313,3 +313,57 @@
       (put s "A1" "=(+ (f 1) g)")
       (is (= 7 (v s "A1")))
       (is (= "(defn f [x] (inc x))\n\n(def g 5)" (sh/merged-defs s))))))
+
+;; --- selective undo/redo (sheet/undo-step) ---------------------------------
+
+(deftest undo-redo-value
+  (testing "undo walks back through a cell's edits; redo reapplies"
+    (let [s (mk)
+          _ (do (put s "A1" "5") (sh/settle! s) (put s "A1" "10") (sh/settle! s))
+          ;; the per-session stack web would have recorded for these two edits
+          st {:undo [{:addr "A1" :prop :value :before nil :after "5"}
+                     {:addr "A1" :prop :value :before "5" :after "10"}]
+              :redo []}
+          r1 (sh/undo-step s st :undo)]
+      (sh/settle! s)
+      (is (= 5 (sh/value s "A1")) "undo -> previous value")
+      (is (= 1 (count (get-in r1 [:stacks :undo]))))
+      (is (= 1 (count (get-in r1 [:stacks :redo]))))
+      (let [r2 (sh/undo-step s (:stacks r1) :undo)]
+        (sh/settle! s)
+        (is (nil? (sh/value s "A1")) "undo the add -> cell cleared")
+        (let [r3 (sh/undo-step s (:stacks r2) :redo)]
+          (sh/settle! s)
+          (is (= 5 (sh/value s "A1")) "redo -> re-add")
+          (is (= 1 (count (get-in r3 [:stacks :undo])))))))))
+
+(deftest undo-selective-supersession
+  (testing "an edit a collaborator overwrote is skipped, not clobbered"
+    (let [s (mk)
+          _ (do (put s "A1" "5") (sh/settle! s)     ; my edit
+                (put s "A1" "10") (sh/settle! s))    ; someone else overwrote
+          st {:undo [{:addr "A1" :prop :value :before nil :after "5"}] :redo []}
+          r  (sh/undo-step s st :undo)]
+      (sh/settle! s)
+      (is (= 10 (sh/value s "A1")) "peer's value preserved")
+      (is (nil? (:affected r)) "nothing applied")
+      (is (empty? (get-in r [:stacks :undo])) "superseded entry consumed"))))
+
+(deftest undo-redo-style
+  (testing "undo/redo a style property"
+    (let [s (mk)
+          _ (do (put s "A1" "5") (sh/set-style! s "A1" :bg "tomato") (sh/settle! s))
+          st {:undo [{:addr "A1" :prop :bg :before nil :after "tomato"}] :redo []}
+          r  (sh/undo-step s st :undo)]
+      (sh/settle! s)
+      (is (nil? (sh/style-value s "A1" :bg)) "undo removes the style")
+      (let [r2 (sh/undo-step s (:stacks r) :redo)]
+        (sh/settle! s)
+        (is (= "tomato" (sh/style-value s "A1" :bg)) "redo restores it")))))
+
+(deftest undo-empty-stack
+  (testing "undo with nothing to undo is a no-op"
+    (let [s (mk)
+          r (sh/undo-step s {:undo [] :redo []} :undo)]
+      (is (nil? (:affected r)))
+      (is (= {:undo [] :redo []} (:stacks r))))))

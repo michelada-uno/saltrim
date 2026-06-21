@@ -126,6 +126,12 @@ sheet-wide default column width and row height.
 - **Arrows** / **Tab** move the selection; **Esc** cancels an edit.
 - The address box (e.g. `A1`) jumps to a cell.
 
+### Undo / redo
+
+- **Ctrl/⌘+Z** undoes your last edit; **Ctrl/⌘+Shift+Z** (or **Ctrl+Y**) redoes.
+- Undo is **per-user**: it only rolls back *your own* edits, and a cell a
+  collaborator changed after you is left untouched.
+
 ### Sharing & collaboration
 
 Owners get a link/lock button in the top bar to share a sheet by **capability

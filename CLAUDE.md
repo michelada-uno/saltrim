@@ -253,8 +253,9 @@ geometry code shared as `.cljc`, and the old hidden-trigger UI replaced by a
 Datastar-attribute + custom-event bridge.
 
 **What's next lives in `ROADMAP.md`** (single source). SCI, per-sheet ns,
-**JS → CLJS**, and **cells → Datahike** (the boss-fight storage move) are all
-DONE; the branch dimension exists (`"main"`) but branch/merge/as-of UI + per-user
-undo are not built yet. Remaining: collapsible-toolbar UI, multi-selection +
-cut/copy/paste, the branching UI. Cheap wins: dependency-graph view, cell
-assertions. See `TECHDEBT.md` for deferred items.
+**JS → CLJS**, **cells → Datahike** (the boss-fight storage move), and **per-user
+selective undo/redo** (`Ctrl+Z`/`Ctrl+Shift+Z`/`Ctrl+Y` → `sheet/undo-step`;
+per-session stack in `web`) are all DONE; the branch dimension exists (`"main"`)
+but branch/merge/as-of UI is not built yet. Remaining: collapsible-toolbar UI,
+multi-selection + cut/copy/paste, the branching UI. Cheap wins: dependency-graph
+view, cell assertions. See `TECHDEBT.md` for deferred items.

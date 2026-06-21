@@ -241,6 +241,45 @@
                      [a (into {} (map (fn [[p e]] [p (:raw e)])) props)])))
         @styles))
 
+;; --- undo / redo (selective; the per-session stack lives in web) ---------
+;;
+;; An undo ENTRY = {:addr :prop :before :after} where `prop` is :value or a style
+;; keyword and before/after are raw sources (nil = blank). `undo-step` applies one
+;; step over the two stacks {:undo [..] :redo [..]} (vectors, top = last): UNDO
+;; sets :before + moves the entry to :redo, REDO sets :after + moves it back — but
+;; ONLY if the target's CURRENT source still equals what that edit set (`:after`
+;; for undo, `:before` for redo). An entry a collaborator has since overwritten is
+;; SUPERSEDED → skipped (dropped), so undo never clobbers someone else's work —
+;; local selective undo. Pure over the stacks; mutates the sheet via set-cell!/
+;; set-style! (caller settles + persists). Returns {:stacks :affected addrs|nil}.
+
+(defn- src-of [sheet addr prop]
+  (if (= prop :value) (raw sheet addr) (get (style-srcs sheet addr) prop)))
+
+(defn- apply-prop!
+  "Set addr's value (prop :value) or one style prop to `src` (nil/blank clears).
+   Returns the addresses to re-render."
+  [sheet addr prop src]
+  (if (= prop :value)
+    (do (set-cell! sheet addr (or src ""))
+        (cons addr (into (dependents* sheet addr) (style-dependents sheet addr))))
+    (do (set-style! sheet addr prop (or src ""))
+        [addr])))
+
+(defn undo-step
+  "Apply one undo (`dir` = :undo) or redo (:redo) over `stacks`. See section note."
+  [sheet stacks dir]
+  (let [[from to pick chk] (if (= dir :undo) [:undo :redo :before :after]
+                               [:redo :undo :after :before])]
+    (loop [fs (vec (get stacks from)) ts (vec (get stacks to))]
+      (if (empty? fs)
+        {:stacks (assoc stacks from fs to ts) :affected nil}
+        (let [entry (peek fs) fs' (pop fs)]
+          (if (= (src-of sheet (:addr entry) (:prop entry)) (chk entry))
+            {:stacks (assoc stacks from fs' to (conj ts entry))
+             :affected (apply-prop! sheet (:addr entry) (:prop entry) (pick entry))}
+            (recur fs' ts)))))))
+
 ;; --- axis sizing --------------------------------------------------------
 ;;
 ;; Per-column widths / per-row heights, sparse: only non-default entries are

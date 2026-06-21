@@ -503,6 +503,11 @@
             [:p {:style p} "Click to select · double-click or " [:span {:style kbd} "Enter"]
              " to edit · arrows / " [:span {:style kbd} "Tab"] " to move · the address box jumps to a cell."]
 
+            [:div {:style h3} "Undo / redo"]
+            [:p {:style p} [:span {:style kbd} "Ctrl/⌘+Z"] " undoes your last edit · "
+             [:span {:style kbd} "Ctrl/⌘+Shift+Z"] " (or " [:span {:style kbd} "Ctrl+Y"] ") redoes. "
+             "Undo only affects your own edits — a cell a collaborator changed after you is left alone."]
+
             [:div {:style h3} "Sharing"]
             [:p {:style p} "The link / lock button (top bar, owner only) shares the sheet by capability "
              "link or with specific people, at view or edit level."]]]))))
@@ -817,6 +822,9 @@
       [:div {:id "ctl" :data-sid sid :style "display:none;"
              :data-on:sr-view__window "$r0=evt.detail.r0, $c0=evt.detail.c0, @post('/view')"
              :data-on:sr-size__window "$rzcmd=evt.detail.cmd, @post('/size')"
+             ;; per-user undo / redo (Ctrl+Z / Ctrl+Shift+Z|Ctrl+Y from app.cljs)
+             :data-on:sr-undo__window "@post('/undo')"
+             :data-on:sr-redo__window "@post('/redo')"
              ;; commit an in-progress edit (app.cljs fires this before a resize
              ;; drag, whose preventDefault would otherwise swallow the blur)
              :data-on:sr-commit__window "$edit && ($cell=$sel, @post('/cell'), $edit=false, $celledit=false, @post('/presence'))"
@@ -1308,6 +1316,47 @@
     (signals! gen {:err (if (seq errs) (str/join "; " errs) "")})
     (broadcast! sid sheet-id sh affected)))
 
+;; --- per-session undo/redo --------------------------------------------------
+;; Each session (≈ a tab) keeps a stack of the edits IT made; the selective-undo
+;; step is sheet/undo-step (it skips props a collaborator has overwritten). Undo
+;; is a normal authored write (persisted + broadcast); the stack is in-memory per
+;; session (lost on reload, like most editors). Stack mutations all happen under
+;; `edit-lock`, so the read-modify-write of a session's stacks is serialized.
+
+(def ^:private UNDO-CAP 200)
+
+(defn- record-edit!
+  "Push an undo entry for a just-applied edit (capped; clears redo). No-op when
+   nothing actually changed."
+  [sid addr prop before after]
+  (when (and (@sessions* sid) (not= before after))
+    (swap! sessions* update sid
+           (fn [s] (-> s
+                       (update :undo #(vec (take-last UNDO-CAP (conj (or % []) {:addr addr :prop prop :before before :after after}))))
+                       (assoc :redo []))))))
+
+(defn- handle-undo* [req dir]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [sid]} gen]
+      (ensure-session! sid sheet-id uid (:token rec))
+      (if (not= :read-write (:level rec))
+        (signals! gen {:err "read-only access — you can't edit this sheet"})
+        (let [sh (:sh rec)
+              affected
+              (locking edit-lock
+                (let [s (@sessions* sid)
+                      {:keys [stacks affected]}
+                      (sheet/undo-step sh {:undo (:undo s) :redo (:redo s)} dir)]
+                  (swap! sessions* update sid assoc :undo (:undo stacks) :redo (:redo stacks))
+                  (when affected (sheet/settle! sh) (save-rec! sheet-id uid))
+                  affected))]
+          (if affected
+            (push-changes! gen sid sheet-id sh affected)
+            (signals! gen {:err ""})))))))           ; nothing (un)doable — silent
+
+(defn- handle-undo [req] (handle-undo* req :undo))
+(defn- handle-redo [req] (handle-undo* req :redo))
+
 (defn- handle-cell [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [cell v sid]} gen]
@@ -1320,8 +1369,10 @@
             (try
               (when (locked-by-other? sid sheet-id cell)
                 (throw (ex-info "locked by another collaborator" {:locked cell})))
-              (sheet/set-cell! sh cell (str v))
-              (sheet/settle! sh)
+              (let [before (sheet/raw sh cell)]
+                (sheet/set-cell! sh cell (str v))
+                (sheet/settle! sh)
+                (record-edit! sid cell :value before (sheet/raw sh cell)))
               (save-rec! sheet-id uid)              ; autosave (source + meta)
               (push-changes! gen sid sheet-id sh
                              (cons cell (into (sheet/dependents* sh cell)
@@ -1346,8 +1397,10 @@
           :else
           (locking edit-lock
             (try
-              (sheet/set-style! sh cell prop src)
-              (sheet/settle! sh)
+              (let [before (get (sheet/style-srcs sh cell) prop)]
+                (sheet/set-style! sh cell prop src)
+                (sheet/settle! sh)
+                (record-edit! sid cell prop before (get (sheet/style-srcs sh cell) prop)))
               (save-rec! sheet-id uid)
               ;; only the styled cell re-renders now; style refs to OTHER cells
               ;; just register the edge for future value changes.
@@ -1879,6 +1932,8 @@
                                                    @sessions*)})})
     [:post "/cell"]       (handle-cell req)
     [:post "/style"]      (handle-style req)
+    [:post "/undo"]       (handle-undo req)
+    [:post "/redo"]       (handle-redo req)
     [:post "/size"]       (handle-size req)
     [:post "/props"]      (handle-props req)
     [:post "/deflock"]    (handle-deflock req)
