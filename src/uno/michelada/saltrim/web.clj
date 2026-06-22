@@ -25,6 +25,7 @@
             [uno.michelada.saltrim.db :as db]
             [uno.michelada.saltrim.fmt :as fmt]
             [uno.michelada.saltrim.formula :as formula]
+            [uno.michelada.saltrim.merge :as mrg]
             [uno.michelada.saltrim.sheet :as sheet]
             [uno.michelada.saltrim.store :as store]
             [uno.michelada.saltrim.util :as util :refer [timed]]
@@ -533,8 +534,9 @@
             [:p {:style p} "A branch is a parallel version of the sheet you can edit without touching the "
              "others — like git for spreadsheets. The " [:span {:style kbd} "🌿"] " picker (top bar) "
              "switches branches; people on different branches don't see each other's cells. The owner's "
-             [:span {:style kbd} "⑂"] " button forks the current branch into a new one or deletes a "
-             "non-main branch. (Merging branches is coming next.)"]
+             [:span {:style kbd} "⑂"] " button forks the current branch into a new one, deletes a "
+             "non-main branch, or merges another branch in — a 3-way merge that auto-applies "
+             "non-overlapping changes and lets you resolve conflicts cell by cell."]
 
             [:div {:style h3} "Sharing"]
             [:p {:style p} "The link / lock button (top bar, owner only) shares the sheet by capability "
@@ -693,6 +695,20 @@
                     :style (str field "flex:1;")}]
            [:button {:class "btn primary" :data-on:click "$branchact='fork', @post('/branch')"}
             (str "Fork from " branch)]]
+          ;; ── merge another branch INTO this one (3-way) ──────────────────
+          (when-let [others (seq (remove #(= % branch) names))]
+            [:div {:style "border-top:1px solid var(--grid);margin-top:.8rem;padding-top:.7rem;"}
+             [:label {:style "display:block;font-size:12px;color:var(--muted);margin-bottom:.2rem;"}
+              (str "Merge another branch into 🌿 " branch)]
+             [:div {:style "display:flex;gap:.4rem;"}
+              [:select {:class "tool" :data-bind:mergefrom "" :style "flex:1;"}
+               [:option {:value ""} "choose a branch…"]
+               (for [n others] [:option {:value n} (str "🌿 " n)])]
+              [:button {:class "btn"
+                        :data-on:click "$mergetake='', $branchact='preview', @post('/merge')"}
+               "Preview"]]
+             ;; preview result + conflict picker + Apply land here (patched by id)
+             [:div {:id "mergeresult"}]])
           (when (not= branch db/MAIN)
             [:div {:style "border-top:1px solid var(--grid);margin-top:.8rem;padding-top:.7rem;"}
              [:button {:class "btn"
@@ -811,8 +827,12 @@
              ;; the right (sheet,branch) room); seeded from the resolved &b=.
              :data-signals:branch (format "'%s'" branch)
              :data-signals:bname "''"            ; new-branch name (fork modal)
-             :data-signals:branchact "''"        ; fork | delete
+             :data-signals:branchact "''"        ; fork | delete | merge-preview/apply
              :data-signals:branchpanel "false"   ; 🌿 modal open?
+             ;; merge (PR B): source branch + the space-separated set of conflict
+             ;; keys ("addr|prop") the owner chose to take from source.
+             :data-signals:mergefrom "''"
+             :data-signals:mergetake "''"
              ;; server sets $goto on a fork/delete to navigate (full reload) to
              ;; the resulting branch — the #goto effect element below watches it.
              :data-signals:goto "''"
@@ -2081,6 +2101,119 @@
               (signals! gen {:err "" :branchpanel false :goto base})))
           (signals! gen {:err ""}))))))
 
+;; --- merge (PR B): 3-way against the recorded fork point -------------------
+
+(defn- merge-val
+  "Compact display of a property's source for the conflict list ((empty) for a
+   deletion / absence; truncated if long)."
+  [s]
+  (cond (nil? s)          [:em {:style "color:var(--muted);"} "(empty)"]
+        (> (count s) 48)  (str (subs s 0 48) "…")
+        :else             s))
+
+(defn- merge-result-html
+  "Inner #mergeresult fragment for a merge PREVIEW of `source` → `target`: the
+   clean-merge count, and for each conflict a checkbox that toggles its key in
+   $mergetake (take source) plus the two competing values. Empty when already up
+   to date. Ends with the Apply button."
+  [source target {:keys [take conflicts]}]
+  (let [nt (count take) nc (count conflicts)
+        mono "font:12px monospace;white-space:pre-wrap;word-break:break-all;"]
+    (str (h/html
+          [:div {:id "mergeresult" :style "margin-top:.6rem;"}
+           (if (and (zero? nt) (zero? nc))
+             [:p {:style "color:var(--muted);margin:.2rem 0;"}
+              (str "✓ 🌿 " target " is already up to date with 🌿 " source ".")]
+             (list
+              [:p {:style "margin:.2rem 0;"}
+               [:strong (str nt)] (str " cell-" (if (= nt 1) "property" "properties") " merge cleanly")
+               (when (pos? nc) [:span (str " · " nc " conflict" (when (> nc 1) "s"))])]
+              (when (pos? nc)
+                [:div {:style (str "max-height:30vh;overflow:auto;border:1px solid var(--grid);"
+                                   "border-radius:6px;padding:.2rem .5rem;margin:.3rem 0;")}
+                 [:p {:style "color:var(--muted);font-size:11px;margin:.2rem 0 .3rem;"}
+                  "Both branches changed these. Tick to take " [:strong (str "🌿 " source)]
+                  "'s version; unticked keeps " [:strong (str "🌿 " target)] "'s."]
+                 (for [{k :key csrc :source ctgt :target} conflicts
+                       :let [ks (mrg/key->str k) [a p] k]]
+                   [:label {:style (str "display:flex;gap:.4rem;align-items:baseline;"
+                                        "padding:.25rem 0;border-top:1px solid var(--grid);")}
+                    [:input {:type "checkbox"
+                             :data-on:change (str "$mergetake = evt.target.checked"
+                                                  " ? ($mergetake+' " ks "').trim()"
+                                                  " : $mergetake.split(' ').filter(x=>x&&x!=='" ks "').join(' ')")}]
+                    [:span {:style "flex:1;"}
+                     [:strong (str a)] " " [:span {:style "color:var(--muted);font-size:11px;"} (name p)]
+                     [:div {:style mono} "↱ " (merge-val csrc)]
+                     [:div {:style (str mono "color:var(--muted);")} "= " (merge-val ctgt)]]])])
+              [:button {:class "btn primary" :style "margin-top:.4rem;"
+                        :data-on:click "$branchact='apply', @post('/merge')"}
+               "Apply merge"]))]))))
+
+(defn- split-keys [s] (remove str/blank? (str/split (str s) #"\s+")))
+
+(defn- apply-merge!
+  "Write the merge `actions` ({[addr prop] src|DELETE}) onto the target engine,
+   recording per-property undo. Value props go through set-cell!, style props
+   through set-style!; a DELETE clears (empty src). Returns affected addrs."
+  [sh sid actions]
+  (let [affected (atom #{})]
+    (doseq [[[addr prop] v] actions
+            :let [src (if (= v mrg/DELETE) "" v)]]
+      (if (= prop :value)
+        (let [before (sheet/raw sh addr)]
+          (sheet/set-cell! sh addr src)
+          (record-edit! sid addr :value before (sheet/raw sh addr))
+          (swap! affected into (cons addr (sheet/dependents* sh addr))))
+        (let [before (get (sheet/style-srcs sh addr) prop)]
+          (sheet/set-style! sh addr prop src)
+          (record-edit! sid addr prop before (get (sheet/style-srcs sh addr) prop))
+          (swap! affected conj addr))))
+    (distinct @affected)))
+
+(defn- handle-merge
+  "Owner-only 3-way merge of `$mergefrom` (source) INTO the current branch
+   (target), against the common-ancestor doc (`db/merge-base` via fork lineage +
+   as-of). `$branchact`:
+   - preview: compute the plan, patch #mergeresult (clean count + conflict picker).
+   - apply:   auto-merge the non-conflicting props plus the conflicts whose key is
+              in $mergetake (take source); write to the target engine, settle,
+              save, broadcast, toast."
+  [req]
+  (with-owner req
+    (fn [uid sheet-id rec {:keys [sid branchact mergefrom mergetake]} gen]
+      (ensure-session! sid sheet-id (:branch rec) uid)
+      (let [target (:branch rec)
+            source (str mergefrom)
+            sh     (:sh rec)]
+        (cond
+          (not (store/valid-branch? source))        (signals! gen {:err "pick a branch to merge"})
+          (= source target)                         (signals! gen {:err "can't merge a branch into itself"})
+          (not (db/branch-exists? sheet-id source))  (signals! gen {:err (str "no branch \"" source "\"")})
+          :else
+          (let [base (db/merge-base sheet-id source target)]
+            (if (nil? base)
+              (signals! gen {:err "no common ancestor — these branches can't be 3-way merged"})
+              (let [plan (mrg/plan base (db/sheet-doc sheet-id source) (sheet/document sh))]
+                (case (str branchact)
+                  "preview"
+                  (d*/patch-elements! gen (merge-result-html source target plan))
+                  "apply"
+                  (locking edit-lock
+                    (let [acts     (mrg/actions plan (split-keys mergetake))
+                          affected (apply-merge! sh sid acts)]
+                      (if (empty? acts)
+                        (signals! gen {:err (str "🌿 " target " is already up to date") :mergetake ""})
+                        (do (sheet/settle! sh)
+                            (save-rec! (:room rec) uid)
+                            (render-window! gen sid (:room rec) sh (session-view sid))
+                            (broadcast-window! sid (:room rec) sh)
+                            (d*/patch-elements! gen (str (h/html [:div {:id "mergeresult"}])))
+                            (signals! gen {:err (str "merged " (count acts) " cell-propert"
+                                                     (if (= 1 (count acts)) "y" "ies") " from 🌿 " source)
+                                           :mergetake "" :mergefrom "" :branchpanel false})))))
+                  (signals! gen {:err ""}))))))))))
+
 ;; --- auth routes (login page, OAuth redirects, logout) -------------------
 
 (defn- url-encode [s] (java.net.URLEncoder/encode (str s) "UTF-8"))
@@ -2264,6 +2397,7 @@
     [:post "/presence"]   (handle-presence req)
     [:post "/share"]      (handle-share req)
     [:post "/branch"]     (handle-branch req)
+    [:post "/merge"]      (handle-merge req)
     {:status 404 :body "not found"})))
 
 (defn port

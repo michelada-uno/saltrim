@@ -242,6 +242,29 @@
                            (some (fn [[a p s]] (when (and (= a "A1") (= p :value)) s))))]
         (is (= "10" as-of-doc) "as-of base-tx yields the pre-divergence value")))))
 
+(deftest merge-base-and-asof
+  (db/upsert-user! {:uid "dev-ann" :name "Ann"})
+  (db/ensure-sheet! S "dev-ann" "s")
+  (db/save-doc! S {"A1" {:value "10"} "B1" {:value "20"} "C1" {:value "30"}} "dev-ann")
+  (db/fork-branch! S "main" "exp")
+  ;; diverge both branches after the fork
+  (db/save-doc! S "main" {"A1" {:value "99"} "B1" {:value "20"} "C1" {:value "30"}} "dev-ann")
+  (db/save-doc! S "exp"  {"A1" {:value "11"} "B1" {:value "20"} "C1" {:value "30"}} "dev-ann")
+  (testing "merge-base = the common ancestor (parent doc at the fork point)"
+    (let [base (db/merge-base S "exp" "main")]      ; exp forked from main
+      (is (= "10" (get-in base ["A1" :value])) "base A1 is the pre-divergence value")
+      (is (= {"A1" {:value "10"} "B1" {:value "20"} "C1" {:value "30"}} base)))
+    (testing "symmetric: merging main into exp resolves the same ancestor"
+      (is (= "10" (get-in (db/merge-base S "main" "exp") ["A1" :value])))))
+  (testing "branch-lineage exposes parent + base-tx; main has none"
+    (is (= "main" (:parent (db/branch-lineage S "exp"))))
+    (is (integer? (:base-tx (db/branch-lineage S "exp"))))
+    (is (nil? (db/branch-lineage S "main"))))
+  (testing "unrelated branches have no common ancestor"
+    (db/fork-branch! S "main" "other")             ; sibling of exp (both off main)
+    ;; exp and other are siblings off main → common ancestor IS resolvable
+    (is (some? (db/merge-base S "exp" "other")) "siblings share their parent as base")))
+
 (deftest delete-branch-isolation
   (db/upsert-user! {:uid "dev-ann" :name "Ann"})
   (db/ensure-sheet! S "dev-ann" "s")

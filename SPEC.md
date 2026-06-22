@@ -30,6 +30,7 @@ on load. Multiple clients edit one sheet live.
 | `db` | Datahike-backed store: users, auth tokens, sheets+shares, **and sheet content** (cells as per-property, branch-aware datoms). Backends: H2 dev/staging, YugabyteDB prod (konserve-jdbc fork), `:memory` for tests. |
 | `runtime` | Referenced by compiled formula bodies. `lookup`/`lookup-val` resolve a cell against the **current execution context's metadata** (works on executor threads). |
 | `formula` | Parse + compile formulas to Spins. |
+| `merge` | Pure 3-way branch merge: flatten docs to `[addr prop]→src`, classify against the common ancestor into auto-merge vs conflicts, build apply actions. No db/engine. |
 | `sheet` | Cell registry over one Spindel execution context. The engine API. |
 | `store` | Persistence seam over `db`: the source document (cells + per-branch scalars) as datoms, branch `"main"`. Keeps `save!`/`load-record`/`exists?`/`list-names`. |
 | `web` | http-kit server, rendering, SSE handlers, sessions, collaboration. |
@@ -265,6 +266,9 @@ that the client `translate`s.
   unauthenticated, 403 page when denied.
 - `POST /branch` — owner-only branch op (`$branchact`: fork `$bname` from the
   current `$branch`, or delete it); sets `$goto` to navigate on success.
+- `POST /merge` — owner-only 3-way merge of `$mergefrom` into the current branch
+  (`$branchact`: preview → patch `#mergeresult`; apply → take auto + the
+  `$mergetake` conflicts from source).
 - `GET /login`, `GET /auth/<provider>[/callback]`, `GET /auth/dev?name=`,
   `POST /logout` — identity (see above).
 - `POST /share` — owner-only sharing mutation (`$shareact`: link / rotate /
@@ -328,6 +332,16 @@ that the client `translate`s.
   re-persist (resurrect) the deleted cells, and `$goto`s back to main.
 - Owner-only is enforced by `with-owner` (same gate as sharing/properties);
   editors can switch to and edit any existing branch (access is per-sheet).
+- **Merge** (`POST /merge`, owner-only): brings a source branch INTO the current
+  one. `db/merge-base` resolves the common-ancestor document from fork lineage
+  (`:branch/parent` + `:branch/base-tx`) via `as-of` — source-of-target,
+  target-of-source, or sibling cases (one-level; deep chains aren't walked).
+  `merge/plan` does the pure 3-way classification per cell-property: only-source
+  changed → auto-take (incl. add/delete); only-target → keep; both → conflict.
+  Preview patches `#mergeresult` (clean count + a per-conflict checkbox toggling
+  its key in `$mergetake`); apply writes the auto set plus the conflicts the
+  owner chose to take-source onto the target engine (`set-cell!`/`set-style!`,
+  per-prop undo), then settles, saves, and re-renders the window for everyone.
 
 ### Presence & edit locking
 
@@ -397,8 +411,8 @@ To cut a release: `git tag v1.2.3 && git push origin v1.2.3`.
 ## Known limitations
 
 See `TECHDEBT.md`. Highlights: `WIN-COLS/ROWS` fixed
-(not viewport-computed); last-write-wins within a branch (cross-branch **merge**
-is PR B); deleting a branch other collaborators are actively on strands them
-(they get denied + must reload to main); session-less sheets loaded by a bare
-`GET /` aren't swept; `/debug` is ungated; concurrent simultaneous edits can race
-a transient `#ERR`.
+(not viewport-computed); last-write-wins within a branch (cross-branch is a 3-way
+**merge**, owner-driven); merge lineage is one-level (no deep-fork LCA); deleting
+a branch other collaborators are actively on strands them (they get denied + must
+reload to main); session-less sheets loaded by a bare `GET /` aren't swept;
+`/debug` is ungated; concurrent simultaneous edits can race a transient `#ERR`.

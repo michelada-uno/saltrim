@@ -414,22 +414,33 @@
 (defn- cp-key [sid branch addr prop] (str sid "|" branch "|" addr "|" (name prop)))
 (defn- br-key [sid branch] (str sid "|" branch))
 
+(defn- doc-from-db
+  "Rebuild {addr {:value raw :style {prop raw}}} for (sheet-id, branch) from the
+   cellprop datoms in db value `dbv` (current db, or a `d/as-of` value)."
+  [dbv sheet-id branch]
+  (->> (d/q '[:find ?addr ?prop ?src
+              :in $ ?sid ?br
+              :where [?sh :sheet/id ?sid] [?c :cellprop/sheet ?sh]
+                     [?c :cellprop/branch ?br] [?c :cellprop/addr ?addr]
+                     [?c :cellprop/prop ?prop] [?c :cellprop/src ?src]]
+            dbv sheet-id branch)
+       (reduce (fn [acc [addr prop src]]
+                 (if (= prop :value)
+                   (assoc-in acc [addr :value] src)
+                   (assoc-in acc [addr :style prop] src)))
+               {})))
+
 (defn sheet-doc
   "Rebuild the source document {addr {:value raw :style {prop raw}}} for
    (sheet-id, branch) from its cellprop datoms. Empty map if none."
   ([sheet-id] (sheet-doc sheet-id MAIN))
-  ([sheet-id branch]
-   (->> (d/q '[:find ?addr ?prop ?src
-               :in $ ?sid ?br
-               :where [?sh :sheet/id ?sid] [?c :cellprop/sheet ?sh]
-                      [?c :cellprop/branch ?br] [?c :cellprop/addr ?addr]
-                      [?c :cellprop/prop ?prop] [?c :cellprop/src ?src]]
-             @conn sheet-id branch)
-        (reduce (fn [acc [addr prop src]]
-                  (if (= prop :value)
-                    (assoc-in acc [addr :value] src)
-                    (assoc-in acc [addr :style prop] src)))
-                {}))))
+  ([sheet-id branch] (doc-from-db @conn sheet-id branch)))
+
+(defn sheet-doc-asof
+  "Like `sheet-doc` but reconstructed as of transaction `tx` — used to recover a
+   fork-point / merge-base document from history (`:keep-history?`)."
+  [sheet-id branch tx]
+  (doc-from-db (d/as-of @conn tx) sheet-id branch))
 
 (defn- doc->flat
   "{addr {:value raw :style {prop raw}}} -> {[addr prop] src}: :value + each
@@ -587,3 +598,29 @@
                             :branch/name to :branch/parent from :branch/base-tx base-tx}))
     (when-let [m (branch-meta sheet-id from)] (set-branch-meta! sheet-id to m))
     (count cells)))
+
+(defn branch-lineage
+  "Fork lineage for (sheet-id, branch) as {:parent :base-tx}, or nil if it has no
+   recorded parent (e.g. `main`, the root, or a branch created without a fork)."
+  [sheet-id branch]
+  (when-let [e (d/q '[:find ?b . :in $ ?k :where [?b :branch/key ?k]] @conn (br-key sheet-id branch))]
+    (let [m (d/pull @conn [:branch/parent :branch/base-tx] e)]
+      (when (:branch/parent m) {:parent (:branch/parent m) :base-tx (:branch/base-tx m)}))))
+
+(defn merge-base
+  "The common-ancestor document {addr {…}} for merging `source` INTO `target`,
+   reconstructed from fork lineage via `as-of`, or nil if the two branches have
+   no determinable common ancestor (then a 3-way merge isn't possible):
+   - source forked from target  -> target `as-of` source.base-tx
+   - target forked from source  -> source `as-of` target.base-tx
+   - siblings of one parent      -> that parent `as-of` min(base-tx)
+   (One-level lineage only — deep fork chains aren't walked; see TECHDEBT.)"
+  [sheet-id source target]
+  (let [ls (branch-lineage sheet-id source)
+        lt (branch-lineage sheet-id target)]
+    (cond
+      (and (= (:parent ls) target) (:base-tx ls)) (sheet-doc-asof sheet-id target (:base-tx ls))
+      (and (= (:parent lt) source) (:base-tx lt)) (sheet-doc-asof sheet-id source (:base-tx lt))
+      (and (:parent ls) (= (:parent ls) (:parent lt)) (:base-tx ls) (:base-tx lt))
+      (sheet-doc-asof sheet-id (:parent ls) (min (:base-tx ls) (:base-tx lt)))
+      :else nil)))

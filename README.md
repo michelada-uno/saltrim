@@ -154,10 +154,12 @@ git, for spreadsheets.
 - People working on **different branches don't see each other's cells** — each
   branch is its own live, collaborative copy.
 - The owner's **⑂ button** opens a small panel to **fork** the current branch
-  into a new one (it starts as an exact copy, then the two diverge) or **delete**
-  a non-main branch.
-- *Merging* branches back together is coming next; for now branches are
-  independent working copies.
+  into a new one (it starts as an exact copy, then the two diverge), **delete**
+  a non-main branch, or **merge** another branch into this one.
+- **Merge** is a 3-way merge against the point the branches diverged: changes
+  that only one side made are merged automatically; where both sides changed the
+  same cell, you get a **conflict list** — tick the ones you want to take from
+  the other branch (unticked keeps your current version), then Apply.
 
 ### Sharing & collaboration
 

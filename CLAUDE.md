@@ -263,7 +263,11 @@ users on different branches don't see each other's cells; `&b=`/`$branch` pick
 the working branch (bad/deleted → main); a branch picker switches, an owner-only
 🌿 modal forks (`db/fork-branch!`, recording `:branch/parent`+`:branch/base-tx`
 lineage) or deletes (`db/delete-branch!`, no resurrection) via `/branch`, with a
-`$goto` signal + `data-effect` to navigate. **Next: merge (PR B)** — 3-way vs the
-recorded fork point, surface conflicts. Then optional as-of viewing (PR C). Cheap
-wins: dependency-graph view, cell assertions. See `TECHDEBT.md` for deferred
-items.
+`$goto` signal + `data-effect` to navigate. **Merge — PR B** is DONE: owner-only
+3-way merge of another branch INTO the current one (`/merge`), against the
+common ancestor resolved from fork lineage via `as-of` (`db/merge-base`); the
+pure `merge` ns classifies each cell-property into auto-merge vs conflict; the
+🌿 modal previews (clean count + per-conflict take-source checkbox → `$mergetake`)
+and applies onto the target engine (live + saved + broadcast). **Next: optional
+as-of viewing (PR C)** — read-only time-travel via per-prop history. Cheap wins:
+dependency-graph view, cell assertions. See `TECHDEBT.md` for deferred items.

@@ -233,17 +233,23 @@ REMAINING:
 - **`app.legacy.js`** is the pre-CLJS hand-written engine, kept for reference.
   Delete once the CLJS port has been in use long enough to trust.
 
-## Git-like branching (feat/branching — PR A: switch + fork)
+## Git-like branching (PR A: switch + fork · PR B: merge)
 
-- **Merge is not built yet (PR B).** PR A ships the model + switch + fork +
-  delete. The fork lineage (`:branch/parent` + `:branch/base-tx`) is recorded so
-  PR B's 3-way merge can reconstruct the common ancestor (parent doc `as-of`
-  base-tx — proven in `spikes/05-branching.clj`). Within a branch it's still
-  last-write-wins.
-- **Merge base assumes one-level lineage.** `base-tx` pins the immediate fork
-  point; a deep chain (fork of a fork, merged back across several hops) has no
-  true LCA computation yet. Fine for the common fork→edit→merge-back flow;
-  revisit if branch trees get deep.
+- **Merge is 3-way, owner-driven (PR B, `feat/branch-merge`).** Within a branch
+  it's still last-write-wins; cross-branch reconciliation is the merge.
+- **Merge base assumes one-level lineage.** `db/merge-base` handles
+  source-of-target, target-of-source, and sibling (same parent) cases via
+  `as-of` base-tx; a deep chain (fork of a fork merged back across several hops)
+  has no true LCA walk yet. Fine for the common fork→edit→merge-back flow;
+  revisit if branch trees get deep. Unrelated branches (no common ancestor) are
+  refused rather than 2-way merged.
+- **Merge re-renders the whole window** (like `/size`): correct + simple, but a
+  huge merge pushes more than the few changed cells. Could target `broadcast!`
+  per affected cell if it matters.
+- **Merge preview/apply recompute independently.** No locked snapshot between
+  preview and apply, so a collaborator editing the source/target in between can
+  shift what Apply does (it always uses live state at apply time). Acceptable;
+  a confirm-against-previewed-plan check could tighten it.
 - **Deleting a branch strands collaborators on it.** `delete-branch!` + the
   in-memory room discard prevent resurrection, but other sessions currently on
   the deleted branch aren't redirected — their next request is denied and they

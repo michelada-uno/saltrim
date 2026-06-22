@@ -95,9 +95,14 @@ visual of the copied range.
     branch (`db/fork-branch!`, recording `:branch/parent` + `:branch/base-tx`
     lineage for merge) or deletes a non-main branch (`db/delete-branch!`, with no
     resurrection on unload). A stale/typo'd `&b=` falls back to main.
-  - **Merge** (PR B, next) — app-level 3-way against the recorded fork point
-    (parent doc `as-of` base-tx): auto-merge non-conflicting props, surface real
-    conflicts for the owner to resolve per property.
+  - **Merge** ✅ SHIPPED *(branch `feat/branch-merge`, PR B)* — owner-only 3-way
+    merge of another branch INTO the current one, against the common ancestor
+    resolved from fork lineage via `as-of` (`db/merge-base`). Pure diff in
+    `merge.clj` classifies each cell-property: auto-merge where only the source
+    changed (incl. deletions/additions), keep target where only it changed,
+    **conflict** where both diverged. `/merge` preview shows the clean count +
+    a conflict picker (tick to take source, default keep target); apply writes
+    the chosen set onto the target engine (live + saved + broadcast).
   - **As-of viewing** (PR C, optional) — read-only time-travel via per-prop
     history.
 - **Per-user undo/redo** ✅ SHIPPED *(branch `feat/undo-redo`)* — local
