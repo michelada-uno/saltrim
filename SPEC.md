@@ -31,6 +31,7 @@ on load. Multiple clients edit one sheet live.
 | `runtime` | Referenced by compiled formula bodies. `lookup`/`lookup-val` resolve a cell against the **current execution context's metadata** (works on executor threads). |
 | `formula` | Parse + compile formulas to Spins. |
 | `merge` | Pure 3-way branch merge: flatten docs to `[addr prop]→src`, classify against the common ancestor into auto-merge vs conflicts, build apply actions. No db/engine. |
+| `graph` | Pure layered-DAG layout for the dependency-graph view: a forward deps-map → nodes + `[from to]` edges + longest-path `layer`. No db/engine. |
 | `sheet` | Cell registry over one Spindel execution context. The engine API. |
 | `store` | Persistence seam over `db`: the source document (cells + per-branch scalars) as datoms, branch `"main"`. Keeps `save!`/`load-record`/`exists?`/`list-names`. |
 | `web` | http-kit server, rendering, SSE handlers, sessions, collaboration. |
@@ -115,7 +116,10 @@ await chain).
   **property of a cell on a branch**: a `:cellprop` entity per
   `(sheet, branch, addr, prop)` → `src`. The cell's value is the `:value` prop;
   each style/format prop (`:bg`/`:fg`/`:format`/…) is its own cellprop, so adding
-  a presentational property needs **no schema change**. `:cellprop/author` records
+  a property needs **no schema change** — including non-presentational metadata
+  like `:label` (a human-readable cell name for the graph view), which rides the
+  exact same per-property path (branch/merge/as-of/undo for free).
+  `:cellprop/author` records
   the current writer's uid (for per-user undo); the change time is Datahike's
   built-in `:db/txInstant`.
 - Per-`(sheet, branch)` **content scalars** (axis-size defaults `dcw`/`drh`, the
@@ -276,6 +280,9 @@ that the client `translate`s.
 - `POST /merge` — owner-only 3-way merge of `$mergefrom` into the current branch
   (`$branchact`: preview → patch `#mergeresult`; apply → take auto + the
   `$mergetake` conflicts from source).
+- `POST /graph` — render the dependency graph (`graph` ns over `sheet/deps`) as a
+  layered SVG into `#graphview` (any reader; capped at 250 nodes). Node label =
+  the cell's `:label` meta-prop else its address; a node click sets `$sel`.
 - `POST /viewat` — read-only scroll for an as-of view: re-render the window of
   (sheet, branch) as of `$at` from a transient historical sheet (no room).
 - `GET /login`, `GET /auth/<provider>[/callback]`, `GET /auth/dev?name=`,

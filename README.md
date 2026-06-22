@@ -174,6 +174,20 @@ to view the sheet **as it was** at that moment — a read-only snapshot you can
 scroll around. A banner shows the timestamp; **Back to live** returns you to the
 current sheet. (Editing is disabled while viewing history.)
 
+### Dependency graph
+
+The **🕸** button opens a diagram of how cells feed each other: an arrow points
+from a cell to the cells whose formulas read it, laid out left-to-right by
+dependency depth. Click a node to select that cell.
+
+To make nodes readable, give a cell a **label**: open the format row (**🎨**),
+pick `label` in the property dropdown, and type a name (e.g. `revenue`). The
+graph then shows the name instead of the address (`A1`). Labels are display-only
+for now (you still reference cells by address / `$A1` in formulas).
+
+> On large real-world tables the graph gets dense — it's intentionally a simple
+> first version (capped, basic layout); zoom/filtering are future polish.
+
 ### Sharing & collaboration
 
 Owners get a link/lock button in the top bar to share a sheet by **capability

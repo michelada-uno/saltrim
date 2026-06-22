@@ -77,12 +77,14 @@
     (sheet/set-cell! s "A1" "5")
     (sheet/set-style! s "A1" :bg "tomato")
     (sheet/set-style! s "A1" :align "center")
+    (sheet/set-style! s "A1" :label "revenue")    ; :label rides the same per-prop path
     (sheet/settle! s)
     (store/save! id s {:author "dev-ann"}))
   (let [s2 (store/load-sheet id)]
     (sheet/settle! s2)
     (is (= "tomato" (sheet/style-value s2 "A1" :bg)))
-    (is (= "center" (sheet/style-value s2 "A1" :align)))))
+    (is (= "center" (sheet/style-value s2 "A1" :align)))
+    (is (= "revenue" (sheet/style-value s2 "A1" :label)) "cell label persists like any prop")))
 
 (deftest defs-roundtrip
   (register!)

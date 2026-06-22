@@ -159,6 +159,11 @@
 (defn raw   [{:keys [meta]} addr] (get-in @meta [addr :raw]))
 (defn kind  [{:keys [meta]} addr] (get-in @meta [addr :kind]))
 (defn cells [{:keys [meta]}] (keys @meta))
+(defn deps
+  "Direct cell addresses `addr`'s value formula references (forward deps), or
+   #{}. The reverse of `dependents*`; together they are the dependency-graph
+   edges."
+  [{:keys [meta]} addr] (get-in @meta [addr :deps] #{}))
 
 ;; --- style layer --------------------------------------------------------
 ;;

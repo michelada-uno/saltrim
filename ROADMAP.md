@@ -6,23 +6,14 @@ reorders freely.
 
 ## Foundational track (do roughly in order — each unlocks the next)
 
-### 1. Formula engine → SCI  *(do first — fixes an active limitation)*
-Today formulas are host `eval` gated by a symbol whitelist (`formula.clj`
-`validate!`). Concrete failure: **local bindings don't work** — `(let [a 1] a)`
-is rejected because every symbol not in `allowed-ops`, including the user's own
-`a`, is disallowed. Whitelisting `let` isn't enough; the binder names can't be
-known up front.
-
-Migrate evaluation to **SCI** (Small Clojure Interpreter): true sandboxed
-interpretation with real lexical scope, controlled vars, no host `eval`.
-- Fixes `let`/locals, `fn` literals, destructuring, etc.
-- Capability-scoped sandbox (expose a namespace of allowed fns) instead of a
-  blacklist-by-symbol — safer and simpler.
-- Must preserve the reactive machinery: the `#cell`/`#cells`/`$val` reader
-  markers, the await-based lift, await de-dup, and cycle rejection. SCI
-  evaluates the *lifted* form against a context exposing only
-  `lookup/await/track/…`.
-- Prerequisite for per-sheet namespaces (item 2).
+### 1. Formula engine → SCI  *(SHIPPED — PR #20)*
+Formulas now evaluate under **SCI** (Small Clojure Interpreter): a sandboxed
+interpreter with real lexical scope (`let`/`fn`/destructuring work), controlled
+vars, and no host `eval`. This replaced the old symbol-whitelist + host `eval`
+(which couldn't allow `let` — the user's own binder names aren't in the list).
+The reactive markers (`#cell`/`#cells`/`$val`, now also `$A1`/`$A3:D8`), the
+await-lift + de-dup, and cycle rejection are preserved; SCI only compiles the
+lifted user body. Per-sheet namespaces (item 2) build on it.
 
 ### 2. Per-sheet namespace + functions  *(SHIPPED — PR #24)*
 Each sheet has its own SCI context: a predefined **stdlib** (math / stats / text
@@ -73,10 +64,18 @@ multi-range copy, style/format in the clip, cross-sheet paste, marching-ants
 visual of the copied range.
 
 ## Cheap wins (slot in anytime; assertions pair well after SCI)
-- **Semantic graph view** — visualize the cell dependency graph (we already
-  track `:deps` + `dependents*`). Mostly a render; big "wow", low cost.
+- **Semantic graph view** ✅ SHIPPED v1 *(branch `feat/dep-graph`)* — a 🕸 modal
+  renders the cell dependency graph as a layered SVG DAG (`graph` ns from
+  `sheet/deps`; arrows point dep → reader; click a node to select it). Nodes show
+  an optional per-cell **`label`** (a metadata prop riding the per-property datom
+  model, set via the style row) else the address. Capped at 250 nodes (real wide
+  tables are unreadable as a graph). **Deferred polish:** force/zoom/filter
+  layout, jump-to-cell (not just select), a dedicated label field, edge styling.
+- **Terse cell refs** ✅ SHIPPED *(branch `feat/formula-dollar-refs`)* — `$A1` /
+  `$A3:D8` as shorthand for `#cell` / `#cells` (relative; shift on paste).
 - **Logic audit / assertions** — per-cell assertions (`=(assert …)`) that flag
-  violations; reuses the formula path + reactive recompute. Nicer once SCI lands.
+  violations; reuses the formula path + reactive recompute. (SCI already shipped,
+  so `let`/`fn` are available.)
 
 ## Strategic (the boss fight)
 - **Cells → Datahike** ✅ SHIPPED *(branch `feat/db-sheet-storage`)* — sheet

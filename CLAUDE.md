@@ -274,6 +274,11 @@ past transaction from a TRANSIENT snapshot (`db/branch-revisions` lists the
 points, `db/sheet-doc-asof`→`store/load-record-asof` rebuilds it); the as-of page
 is request-scoped (no live room/stream, scroll via `/viewat`), edits refused
 (`$at`→`:read`); a 🕘 modal enters it, a banner+picker+Back-to-live drive it. The
-**git-like branching boss fight is complete** (switch/fork/merge/as-of). Cheap
-wins next: dependency-graph view, cell assertions. See `TECHDEBT.md` for deferred
-items.
+**git-like branching boss fight is complete** (switch/fork/merge/as-of).
+**Dependency-graph view + terse refs** are DONE: `$A1`/`$A3:D8` are shorthand for
+`#cell`/`#cells` (relative, shift on paste); a 🕸 modal renders the cell graph as
+a layered SVG DAG (pure `graph` ns over `sheet/deps`; arrows dep→reader; click a
+node → `$sel`; capped at 250). Nodes show an optional per-cell `:label` (a
+metadata prop on the per-property datom path, set via the style row) else the
+address. Cheap win left: cell assertions (`=(assert …)`). See `TECHDEBT.md` for
+deferred items.

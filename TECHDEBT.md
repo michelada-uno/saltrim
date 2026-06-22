@@ -263,6 +263,25 @@ REMAINING:
   each other (by design — different working copies). There's no "who's on which
   branch" overview.
 
+## Dependency-graph view + cell labels (feat/dep-graph)
+
+- **Graph is a deliberate v1.** Layered SVG DAG with a fixed grid layout, capped
+  at 250 nodes (real wide tables are unreadable as a node graph). No zoom, pan,
+  force layout, filtering, or focus-on-a-cell-and-its-neighbours yet — all
+  deferred polish (per the owner's "quick one-shot, defer polish" call).
+- **Node click selects, doesn't jump.** Clicking a node sets `$sel` (fills the
+  address box) but doesn't scroll the grid to it — that needs an app.cljs jump
+  bridge; skipped to keep this PR server-only (no cljs rebuild).
+- **Graph isn't pushed live.** `/graph` renders on open; it won't update while
+  open if a collaborator edits. Reopen to refresh. (Fine — it's a peek.)
+- **Labels are display-only + set via the style dropdown.** `:label` is a cell
+  metadata prop (rides the per-property datom path), but it's settable only by
+  picking `label` in the 🎨 style row — there's no dedicated label field, and it
+  isn't referenceable in formulas (formula-by-name is a separate, larger
+  feature). Label uniqueness isn't enforced (irrelevant while display-only).
+- **Only value-formula deps are graphed.** `sheet/deps` is the value layer; style
+  formula deps (`style-deps`) aren't drawn. Minor.
+
 ## As-of / history viewing (PR C: feat/branch-history)
 
 - **Cells are reconstructed as-of, but defs + axis sizing use the CURRENT

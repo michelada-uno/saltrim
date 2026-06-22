@@ -25,6 +25,7 @@
             [uno.michelada.saltrim.db :as db]
             [uno.michelada.saltrim.fmt :as fmt]
             [uno.michelada.saltrim.formula :as formula]
+            [uno.michelada.saltrim.graph :as graph]
             [uno.michelada.saltrim.merge :as mrg]
             [uno.michelada.saltrim.sheet :as sheet]
             [uno.michelada.saltrim.store :as store]
@@ -293,8 +294,15 @@
    model as style props — just applied in `display` instead of as a CSS decl."
   [:format])
 
+(def meta-props
+  "Per-cell METADATA props: stored + persisted like a style prop (so they ride
+   the per-property datom model — branch/merge/as-of/undo for free) but neither
+   rendered as CSS nor applied to the value. `:label` is a human-readable name
+   for the cell, used as its node label in the dependency-graph view."
+  [:label])
+
 (defn- prop-allowed? [p]
-  (or (contains? style-css p) (some #{p} value-props)))
+  (or (contains? style-css p) (some #{p} value-props) (some #{p} meta-props)))
 
 (defn- cell-style-decls
   "Inline CSS for `a`'s style props (only those resolving to a string; errors /
@@ -508,6 +516,11 @@
              [:span {:style kbd} "fg"] " (text color), " [:span {:style kbd} "weight"] " (e.g. bold), "
              [:span {:style kbd} "slant"] " (e.g. italic), " [:span {:style kbd} "align"] " (left/right/center)."]
             [:p {:style p} "e.g. bg " [:span {:style kbd} "=(if (> $val 100) \"tomato\" \"white\")"]]
+
+            [:div {:style h3} "Dependency graph"]
+            [:p {:style p} "The " [:span {:style kbd} "🕸"] " button draws how cells feed each other "
+             "(an arrow points from a cell to the cells that use it); click a node to select it. "
+             "Set a cell's " [:span {:style kbd} "label"] " (style row) to name its node."]
 
             [:div {:style h3} "Number format"]
             [:p {:style p} "Property " [:span {:style kbd} "format"] " takes a mask applied to numeric values: "
@@ -805,6 +818,26 @@
                             "text-decoration:none;color:var(--fg);font:12px monospace;")}
             (str "🕘 " (fmt-ts inst))])])]]))
 
+(defn- graph-modal-html
+  "The 🕸 dependency-graph modal shell, toggled by $graphpanel. Its #graphview
+   inner is server-rendered by /graph when the modal opens (so it's always
+   fresh)."
+  []
+  [:div {:data-show "$graphpanel" :data-on:click "$graphpanel=false"
+         :style (str "position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.35);"
+                     "display:flex;align-items:flex-start;justify-content:center;padding:8vh 1rem;")}
+   [:div {:data-on:click "evt.stopPropagation()"
+          :style (str "background:var(--bg);border:1px solid var(--line);border-radius:8px;"
+                      "box-shadow:0 8px 32px rgba(0,0,0,.25);max-width:52rem;width:100%;"
+                      "padding:1rem 1.1rem;font:13px sans-serif;color:var(--fg);")}
+    [:div {:style "display:flex;align-items:center;margin-bottom:.4rem;"}
+     [:h2 {:style "margin:0;font:600 15px sans-serif;flex:1;"} "Dependency graph"]
+     [:button {:class "btn" :data-on:click "$graphpanel=false" :title "close"} "✕"]]
+    [:p {:style "color:var(--muted);margin:.2rem 0 .5rem;"}
+     "An arrow points from a cell to the cells whose formulas read it. Click a node to select it. "
+     "Name a cell (style row → " [:span {:style "font-family:monospace;"} "label"] ") for a friendlier node."]
+    [:div {:id "graphview" :style "overflow:auto;max-height:64vh;"}]]])
+
 (defn- page [sh storage-id sname branch at uid link-token]
   ;; one session id seeds BOTH $sid (sent on /stream, registers the session) and
   ;; #ctl's data-sid (read by the unload beacon) — they must be the same value.
@@ -954,6 +987,8 @@
              :data-signals:bigwhat "''"
              :data-signals:big "''"
              :data-signals:help "false"
+             ;; dependency-graph view (🕸 modal) — server renders #graphview on open
+             :data-signals:graphpanel "false"
              ;; sheet properties (⚙ modal, owner-only) — seeded with current defaults
              :data-signals:propspanel "false"
              :data-signals:pcw (str (sheet/default-col-w sh))
@@ -969,6 +1004,7 @@
       (when-not asof? (h/raw (bigedit-html)))
       (when (and owner? (not asof?)) (h/raw (props-html)))
       (when-not asof? (history-modal storage-id sname branch revisions link-token owner?))
+      (when-not asof? (graph-modal-html))
       ;; ── toolbar row 1: sheet management + sharing + identity ───────────
       [:div {:class "toolrow"}
        (sheet-picker uid storage-id sname)
@@ -991,6 +1027,7 @@
           [:button {:class "btn" :data-class:active "$fmtbar"
                     :data-on:click "$fmtbar = !$fmtbar" :title "format / style controls"} "🎨"]
           [:button {:class "btn" :data-on:click "$defspanel=true" :title "sheet definitions (reusable functions)"} "ƒ"]
+          [:button {:class "btn" :data-on:click "$graphpanel=true, @post('/graph')" :title "dependency graph"} "🕸"]
           (when owner?
             [:button {:class "btn" :data-on:click "$propspanel=true" :title "sheet properties"} "⚙"])
           [:button {:class "btn" :data-on:click "$histpanel=true" :title "history — view an earlier revision"} "🕘"]
@@ -1030,7 +1067,7 @@
                       "c && ($v=c.dataset.raw||'',"
                       "$stylesrc=c.dataset.sty?(JSON.parse(c.dataset.sty)[$styleprop]||''):'')")
                  :title "style / format property of the selected cell"}
-        (for [p (concat (keys style-css) value-props)] [:option {:value (name p)} (name p)])]
+        (for [p (concat (keys style-css) value-props meta-props)] [:option {:value (name p)} (name p)])]
        [:input {:id "stylesrcbox" :class "tool mono" :data-bind:stylesrc ""
                 :placeholder "color / mask / =formula (use $val) — Enter to apply"
                 :data-on:keydown "evt.key==='Enter' && ($cell=$sel, @post('/style'))"
@@ -2357,6 +2394,75 @@
                                            :mergetake "" :mergefrom "" :branchpanel false})))))
                   (signals! gen {:err ""}))))))))))
 
+;; --- dependency-graph view ------------------------------------------------
+
+(defn- node-label
+  "A cell's display name in the graph: its `:label` meta-prop if set, else the
+   address."
+  [sh a]
+  (let [l (sheet/style-value sh a :label)]
+    (if (and (string? l) (not (str/blank? l))) l (str a))))
+
+(defn- graph-svg
+  "Render the layered DAG (`graph/build` output) as an inline SVG: nodes placed
+   left→right by dependency depth, edges arrow from a cell to the cells that read
+   it. A node click selects the cell (and closes the modal)."
+  [sh {:keys [nodes edges layer]}]
+  (let [COLW 168 ROWH 40 NW 132 NH 26 PAD 16
+        by-layer (->> nodes (group-by layer) (into (sorted-map)))
+        pos (into {}
+                  (for [[lyr ns] by-layer
+                        [i a] (map-indexed
+                               vector
+                               (sort-by (fn [a] (let [{:keys [ci ri]} (addr/parse a)] [ri ci])) ns))]
+                    [a [(+ PAD (* (long lyr) COLW)) (+ PAD (* i ROWH))]]))
+        nlayers (inc (long (apply max 0 (vals layer))))
+        maxrows (apply max 1 (map count (vals by-layer)))
+        W (+ PAD (* nlayers COLW))
+        H (+ PAD (* maxrows ROWH))]
+    (str (h/html
+          [:svg {:viewBox (format "0 0 %d %d" W H) :width W :height H
+                 :style "font:11px sans-serif;min-width:100%;"}
+           [:defs
+            [:marker {:id "arr" :viewBox "0 0 10 10" :refX "9" :refY "5"
+                      :markerWidth "7" :markerHeight "7" :orient "auto-start-reverse"}
+             [:path {:d "M0,0 L10,5 L0,10 z" :fill "#9ec9ee"}]]]
+           (for [[f t] edges :let [[fx fy] (pos f) [tx ty] (pos t)]]
+             [:line {:x1 (+ fx NW) :y1 (+ fy (quot NH 2)) :x2 tx :y2 (+ ty (quot NH 2))
+                     :stroke "#9ec9ee" :stroke-width "1.5" :marker-end "url(#arr)"}])
+           (for [a nodes :let [[x y] (pos a) lbl (node-label sh a)]]
+             [:g {:data-on:click (str "$sel='" a "', $graphpanel=false") :style "cursor:pointer;"}
+              [:title (str a)]
+              [:rect {:x x :y y :width NW :height NH :rx 4
+                      :fill "#f4f6f8" :stroke "#2f8fd8" :stroke-width "1"}]
+              [:text {:x (+ x 8) :y (+ y 17) :fill "#3a4149"}
+               (let [s (str lbl)] (if (> (count s) 19) (str (subs s 0 18) "…") s))]])]))))
+
+(defn- handle-graph
+  "Render the current (sheet,branch) dependency graph into #graphview. Any reader
+   (incl. read-only viewers) may view it. Capped — a huge sheet is unreadable as
+   a graph, so we show a count instead of drawing thousands of nodes."
+  [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [sid]} gen]
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
+      (let [sh       (:sh rec)
+            deps-map (into {} (for [a (sheet/cells sh)
+                                    :let [ds (sheet/deps sh a)] :when (seq ds)]
+                                [a ds]))
+            {:keys [nodes] :as g} (graph/build deps-map)
+            inner (cond
+                    (empty? nodes)
+                    (str (h/html [:p {:style "color:var(--muted);"}
+                                  "No dependencies yet — write a formula that references "
+                                  "another cell, e.g. " [:span {:style "font-family:monospace;"} "=(+ $A1 1)"] "."]))
+                    (> (count nodes) 250)
+                    (str (h/html [:p {:style "color:var(--muted);"}
+                                  (str "This sheet has " (count nodes) " connected cells — too many to "
+                                       "draw usefully yet. Filtering / zoom is a future improvement.")]))
+                    :else (graph-svg sh g))]
+        (patch-inner! gen "#graphview" inner)))))
+
 ;; --- auth routes (login page, OAuth redirects, logout) -------------------
 
 (defn- url-encode [s] (java.net.URLEncoder/encode (str s) "UTF-8"))
@@ -2555,6 +2661,7 @@
     [:post "/share"]      (handle-share req)
     [:post "/branch"]     (handle-branch req)
     [:post "/merge"]      (handle-merge req)
+    [:post "/graph"]      (handle-graph req)
     {:status 404 :body "not found"})))
 
 (defn port
