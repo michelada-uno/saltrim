@@ -144,6 +144,21 @@ sheet-wide default column width and row height.
 - Undo is **per-user**: it only rolls back *your own* edits, and a cell a
   collaborator changed after you is left untouched.
 
+### Branches
+
+A **branch** is a parallel version of a sheet you can edit independently — like
+git, for spreadsheets.
+
+- The **🌿 picker** in the top bar switches branches (the address bar gains
+  `&b=<branch>`). Every sheet starts on `main`.
+- People working on **different branches don't see each other's cells** — each
+  branch is its own live, collaborative copy.
+- The owner's **⑂ button** opens a small panel to **fork** the current branch
+  into a new one (it starts as an exact copy, then the two diverge) or **delete**
+  a non-main branch.
+- *Merging* branches back together is coming next; for now branches are
+  independent working copies.
+
 ### Sharing & collaboration
 
 Owners get a link/lock button in the top bar to share a sheet by **capability

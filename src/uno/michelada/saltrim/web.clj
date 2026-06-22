@@ -77,49 +77,58 @@
 
 ;; --- state --------------------------------------------------------------
 
-;; storage-id -> {:sh sheet :owner uid|nil} (lazy: load / create)
+;; room = [storage-id branch]. sheets* : room -> {:sh sheet :owner uid|nil}
+;; (lazy: load / create). A branch is its own collaborative working copy, so the
+;; loaded engine + every collaboration broadcast is keyed by the (sheet,branch)
+;; pair, not the bare id. The default branch is db/MAIN.
 (defonce ^:private sheets* (atom {}))
 
 (defn- sheet-rec
-  "The loaded record for a storage id; loads from disk lazily, else creates a
-   fresh private sheet owned by `owner`. Registers the sheet in the DB. On its
-   first registration the file's legacy :public flag becomes a capability link;
-   any pre-link :everyone grant is upgraded to a link too (one-shot)."
-  [id owner]
-  (or (@sheets* id)
-      (let [loaded   (store/load-record id)
-            rec      (or loaded {:sh (sheet/create-sheet) :owner owner})
-            [o n]    (store/split-id id)
-            owner    (or (:owner rec) o)
-            new?     (db/ensure-sheet! id owner n)]
-        (when (and new? (:public rec)) (db/set-link-level! id :read-write))
-        (db/migrate-everyone->link! id)         ; upgrade legacy public grants
-        (let [rec (-> rec (dissoc :public) (assoc :owner owner))]
-          (swap! sheets* assoc id rec)
-          rec))))
+  "The loaded record for a (storage id, branch); loads from the db lazily, else
+   creates a fresh private sheet owned by `owner`. Registers the SHEET (not the
+   branch) in the DB — branch existence is handled by db/branch-exists?/fork.
+   On a sheet's first registration the legacy :public flag becomes a capability
+   link; any pre-link :everyone grant is upgraded too (one-shot)."
+  [id branch owner]
+  (let [room [id branch]]
+    (or (@sheets* room)
+        (let [loaded   (store/load-record id branch)
+              rec      (or loaded {:sh (sheet/create-sheet) :owner owner})
+              [o n]    (store/split-id id)
+              owner    (or (:owner rec) o)
+              new?     (db/ensure-sheet! id owner n)]
+          (when (and new? (:public rec)) (db/set-link-level! id :read-write))
+          (db/migrate-everyone->link! id)       ; upgrade legacy public grants
+          (let [rec (-> rec (dissoc :public) (assoc :owner owner))]
+            (swap! sheets* assoc room rec)
+            rec)))))
 
 (defn- save-rec!
-  "Persist a loaded sheet's content to the db, authored by `author` uid (the
-   acting user — recorded per changed cell for per-user undo). `author` is nil
-   for non-edit autosaves (e.g. the save on session unload)."
-  ([id] (save-rec! id nil))
-  ([id author]
-   (when-let [{:keys [sh]} (@sheets* id)]
-     (store/save! id sh {:author author}))))
+  "Persist a loaded room's content to the db (branch-scoped), authored by
+   `author` uid (the acting user — recorded per changed cell for per-user undo).
+   `author` is nil for non-edit autosaves (e.g. the save on session unload).
+   `room` = [storage-id branch]."
+  ([room] (save-rec! room nil))
+  ([[id branch :as room] author]
+   (when-let [{:keys [sh]} (@sheets* room)]
+     (store/save! id sh {:author author :branch branch}))))
 
 (defn- accessible-rec
-  "The record for storage id IF `uid` (carrying optional link `token`) may
-   access it: owners reach (and auto-create) their own sheets; anyone signed-in
-   reaches a foreign sheet they were granted, or whose link token they hold.
-   Nil = denied/invalid."
-  [uid id token]
+  "The record for (storage id, branch) IF `uid` (carrying optional link `token`)
+   may access it: owners reach (and auto-create) their own sheets; anyone
+   signed-in reaches a foreign sheet they were granted, or whose link token they
+   hold. A non-existent branch (other than MAIN) is denied so a typo'd `&b=`
+   never materialises an empty branch (creation is explicit via fork). The rec
+   carries `:room`/`:branch`. Nil = denied/invalid."
+  [uid id branch token]
   (when (and uid (store/valid-id? id))
     (let [[owner _] (store/split-id id)]
       (cond
-        (nil? owner)  nil                       ; legacy un-namespaced ids: not served
-        (= owner uid) (sheet-rec id uid)
-        :else (when (or (@sheets* id) (store/exists? id))
-                (let [rec (sheet-rec id owner)]
+        (nil? owner)                       nil  ; legacy un-namespaced ids: not served
+        (not (db/branch-exists? id branch)) nil ; unknown branch (MAIN always exists)
+        (= owner uid) (sheet-rec id branch uid)
+        :else (when (or (@sheets* [id branch]) (store/exists? id))
+                (let [rec (sheet-rec id branch owner)]
                   (when (db/access-level uid id token) rec)))))))
 
 ;; Sessions: one per client. Hold the sheet id + per-session viewport (view/dims)
@@ -153,22 +162,25 @@
 (defn- session-view [sid] (get-in @sessions* [sid :view] {:r0 0 :c0 0}))
 (defn- set-session-view! [sid v] (when (@sessions* sid) (swap! sessions* assoc-in [sid :view] v)))
 
-(defn- sessions-on [sheet-id]
-  (count (filter #(= sheet-id (:sheet %)) (vals @sessions*))))
+(defn- sessions-on
+  "How many live sessions are in `room` (= [sheet-id branch])."
+  [room]
+  (count (filter #(= room (:room %)) (vals @sessions*))))
 
 (defn- unload-sheet!
-  "Save then release a sheet whose last session just left."
-  [sheet-id]
-  (when (and (zero? (sessions-on sheet-id)) (@sheets* sheet-id))
-    (let [{:keys [sh]} (@sheets* sheet-id)]
-      (save-rec! sheet-id)                ; autosave on unload — no acting user
+  "Save then release the engine for a room whose last session just left."
+  [room]
+  (when (and (zero? (sessions-on room)) (@sheets* room))
+    (let [{:keys [sh]} (@sheets* room)]
+      (save-rec! room)                   ; autosave on unload — no acting user
       (sheet/close! sh)
-      (swap! sheets* dissoc sheet-id))))
+      (swap! sheets* dissoc room))))
 
-(defn- register-session! [sid sheet-id uid token]
+(defn- register-session! [sid sheet-id branch uid token]
   (let [[owner _] (store/split-id sheet-id)]
-    (sheet-rec sheet-id (or owner uid)))  ; acquire (load) the sheet
-  (swap! sessions* assoc sid {:sheet sheet-id :view {:r0 0 :c0 0}
+    (sheet-rec sheet-id branch (or owner uid)))  ; acquire (load) the branch
+  (swap! sessions* assoc sid {:sheet sheet-id :branch branch :room [sheet-id branch]
+                              :view {:r0 0 :c0 0}
                               :dims nil :last-seen (now)
                               :uid uid :token token
                               :uname (or (:name (auth/user-info uid)) uid)
@@ -180,31 +192,32 @@
 (defn- ensure-session!
   "Lazily (re)register a session for an active request, then stamp it alive. A
    client whose session was swept (crash/sleep TTL) transparently comes back.
-   A sid registered under a DIFFERENT user is re-registered for the current
-   one (a sid is client-generated — never trust it to carry identity). The link
-   `token` (if any) is remembered so a later link rotate/downgrade can re-check
-   this session's access."
-  [sid sheet-id uid & [token]]
+   A sid registered under a DIFFERENT user OR a different room (the client
+   navigated to another sheet/branch reusing the sid) is re-registered (a sid is
+   client-generated — never trust it to carry identity). The link `token` (if
+   any) is remembered so a later link rotate/downgrade can re-check access."
+  [sid sheet-id branch uid & [token]]
   (when (and sid (re-matches sid-re (str sid)))
-    (let [s (@sessions* sid)]
-      (if (or (nil? s) (not= uid (:uid s)))
-        (register-session! sid sheet-id uid token)
+    (let [s    (@sessions* sid)
+          room [sheet-id branch]]
+      (if (or (nil? s) (not= uid (:uid s)) (not= room (:room s)))
+        (register-session! sid sheet-id branch uid token)
         (when token (swap! sessions* assoc-in [sid :token] token))))
     (touch! sid)))
 
 (declare close-gen! broadcast-presence! broadcast-deflib!)
 (defn- reap-session!
-  "Drop a session: close its push stream and unload the sheet if it was last."
+  "Drop a session: close its push stream and unload the room if it was last."
   [sid]
   (when-let [s (@sessions* sid)]
     (close-gen! s)
     (swap! sessions* dissoc sid)
-    (unload-sheet! (:sheet s))
-    ;; the departed cursor must disappear from peers still on the sheet; and any
+    (unload-sheet! (:room s))
+    ;; the departed cursor must disappear from peers still in the room; and any
     ;; definition lock it held must release for everyone else
-    (when (pos? (sessions-on (:sheet s)))
-      (broadcast-presence! (:sheet s))
-      (broadcast-deflib! (:sheet s)))))
+    (when (pos? (sessions-on (:room s)))
+      (broadcast-presence! (:room s))
+      (broadcast-deflib! (:room s)))))
 
 (defn- sweep! []
   (let [cutoff (- (now) SESSION-TTL-MS)]
@@ -516,6 +529,13 @@
              [:span {:style kbd} "Ctrl/⌘+Shift+Z"] " (or " [:span {:style kbd} "Ctrl+Y"] ") redoes. "
              "Undo only affects your own edits — a cell a collaborator changed after you is left alone."]
 
+            [:div {:style h3} "Branches"]
+            [:p {:style p} "A branch is a parallel version of the sheet you can edit without touching the "
+             "others — like git for spreadsheets. The " [:span {:style kbd} "🌿"] " picker (top bar) "
+             "switches branches; people on different branches don't see each other's cells. The owner's "
+             [:span {:style kbd} "⑂"] " button forks the current branch into a new one or deletes a "
+             "non-main branch. (Merging branches is coming next.)"]
+
             [:div {:style h3} "Sharing"]
             [:p {:style p} "The link / lock button (top bar, owner only) shares the sheet by capability "
              "link or with specific people, at view or edit level."]]]))))
@@ -626,7 +646,63 @@
           [:option {:value (str "u=" o "&s=" nm) :selected (= sheet-id storage-id)}
            (str icon " " (if (str/blank? name) nm name))])])]))
 
-(defn- page [sh storage-id sname uid link-token]
+(defn- branch-bar
+  "Branch picker + owner-only fork/delete (a 🌿 dropdown + ⑂ modal). A branch is
+   a parallel copy of the sheet you edit independently. Switching navigates (full
+   reload, like the sheet picker), preserving the sheet URL. Fork/delete post to
+   /branch; on success the server sets $goto and the page navigates."
+  [uid storage-id sname branch link-token owner?]
+  (let [names (db/branch-names storage-id)
+        ;; the sheet's own URL (owners reach theirs by ?s=; a link visitor keeps
+        ;; ?t=; a shared viewer keeps ?u=&s=). The picker appends &b=.
+        base  (cond link-token (str "/?t=" link-token)
+                    owner?      (str "/?s=" sname)
+                    :else       (str "/?u=" (first (store/split-id storage-id)) "&s=" sname))
+        overlay (str "position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.35);"
+                     "display:flex;align-items:flex-start;justify-content:center;padding:12vh 1rem;")
+        modal   (str "background:var(--bg);border:1px solid var(--line);border-radius:8px;"
+                     "box-shadow:0 8px 32px rgba(0,0,0,.25);max-width:24rem;width:100%;padding:1rem 1.1rem;"
+                     "font:13px sans-serif;color:var(--fg);")
+        field   (str "font:13px sans-serif;padding:6px 8px;border:1px solid var(--line);"
+                     "border-radius:var(--radius);box-sizing:border-box;")]
+    (list
+     [:select {:id "branchpicker" :class "tool" :title "branch — a parallel version of this sheet"
+               ;; navigate to the picked branch (main → no &b=, keeps URLs clean)
+               :data-on:change (str "el.value && (location.href='" base "'"
+                                    " + (el.value==='" db/MAIN "' ? '' : '&b='+el.value))")
+               :style "max-width:9rem;"}
+      (for [n names]
+        [:option {:value n :selected (= n branch)} (str "🌿 " n)])]
+     (when owner?
+       (list
+        [:button {:class "btn" :data-on:click "$branchpanel=true"
+                  :title "branches: fork / delete"} "⑂"]
+        [:div {:data-show "$branchpanel" :data-on:click "$branchpanel=false" :style overlay}
+         [:div {:data-on:click "evt.stopPropagation()" :style modal}
+          [:div {:style "display:flex;align-items:center;margin-bottom:.5rem;"}
+           [:h2 {:style "margin:0;font:600 15px sans-serif;flex:1;"} "Branches"]
+           [:button {:class "btn" :data-on:click "$branchpanel=false" :title "close"} "✕"]]
+          [:p {:style "color:var(--muted);margin:.2rem 0 .7rem;"}
+           "On branch " [:strong (str "🌿 " branch)] ". A fork copies it into a new "
+           "parallel branch you can edit without touching this one."]
+          [:label {:style "display:block;font-size:12px;color:var(--muted);margin-bottom:.2rem;"}
+           "New branch name"]
+          [:div {:style "display:flex;gap:.4rem;"}
+           [:input {:data-bind:bname "" :placeholder "feature-x" :autocomplete "off"
+                    :data-on:keydown "evt.key==='Enter' && ($branchact='fork', @post('/branch'))"
+                    :style (str field "flex:1;")}]
+           [:button {:class "btn primary" :data-on:click "$branchact='fork', @post('/branch')"}
+            (str "Fork from " branch)]]
+          (when (not= branch db/MAIN)
+            [:div {:style "border-top:1px solid var(--grid);margin-top:.8rem;padding-top:.7rem;"}
+             [:button {:class "btn"
+                       :data-on:click (str "confirm('Delete branch \\u201c" branch "\\u201d? "
+                                           "This removes its cells and cannot be undone.') && "
+                                           "($branchact='delete', @post('/branch'))")
+                       :style "color:var(--danger);border-color:var(--danger);"}
+              (str "Delete “" branch "”")]])]])))))
+
+(defn- page [sh storage-id sname branch uid link-token]
   ;; one session id seeds BOTH $sid (sent on /stream, registers the session) and
   ;; #ctl's data-sid (read by the unload beacon) — they must be the same value.
   (let [sid    (str (random-uuid))
@@ -731,6 +807,15 @@
              :data-signals:r0 "0"
              :data-signals:c0 "0"
              :data-signals:sheet (format "'%s'" storage-id)
+             ;; the working branch (rides in every POST so the server routes to
+             ;; the right (sheet,branch) room); seeded from the resolved &b=.
+             :data-signals:branch (format "'%s'" branch)
+             :data-signals:bname "''"            ; new-branch name (fork modal)
+             :data-signals:branchact "''"        ; fork | delete
+             :data-signals:branchpanel "false"   ; 🌿 modal open?
+             ;; server sets $goto on a fork/delete to navigate (full reload) to
+             ;; the resulting branch — the #goto effect element below watches it.
+             :data-signals:goto "''"
              :data-signals:sid (format "'%s'" sid)
              :data-signals:link (format "'%s'" (or link-token ""))
              :data-signals:sharepanel "false"
@@ -777,6 +862,12 @@
                 :data-on:keydown "evt.key==='Enter' && el.value && (location.href='/?s='+el.value)"
                 :title "type a name + Enter to create/open one of your sheets"
                 :style "width:6rem;"}]
+       ;; branch picker + owner-only fork/delete
+       (branch-bar uid storage-id sname branch link-token owner?)
+       ;; navigate (full reload) when the server sets $goto (fork/delete result).
+       ;; no signal refs besides $goto ⇒ runs only when $goto changes (not on load
+       ;; while it is "").
+       [:div {:id "goto" :data-effect "$goto && window.location.assign($goto)" :style "display:none;"}]
        ;; sharing toggle / badge (patched back by POST /share)
        (h/raw (share-html uid storage-id link-token))
        [:span {:class "spacer"}]
@@ -1010,12 +1101,12 @@
                     addrs))))
 
 (defn- broadcast!
-  "Push changed cells to OTHER sessions on the same sheet, each scoped to that
-   session's own viewport (so coords match their window). A write to a dead
-   stream throws -> reap that session."
-  [editor-sid sheet-id sh affected]
+  "Push changed cells to OTHER sessions in the same ROOM (sheet+branch), each
+   scoped to that session's own viewport (so coords match their window). A write
+   to a dead stream throws -> reap that session."
+  [editor-sid room sh affected]
   (doseq [[sid s] @sessions*]
-    (when (and (not= sid editor-sid) (= sheet-id (:sheet s)) (:gen s))
+    (when (and (not= sid editor-sid) (= room (:room s)) (:gen s))
       (let [vis (filter #(in-window? (:view s) %) affected)]
         (when (seq vis)
           (try (d*/lock-sse! (:gen s) (d*/patch-elements! (:gen s) (render-cells sh vis (:view s))))
@@ -1050,27 +1141,28 @@
             (if editing? (str tag " editing…") tag)]]))))
 
 (defn- peers-html
-  "Overlay markers for every OTHER session whose cursor falls in viewer-sid's
-   window. Rendered relative to the viewer's own view so coords line up."
-  [viewer-sid sheet-id]
+  "Overlay markers for every OTHER session in the viewer's ROOM whose cursor
+   falls in viewer-sid's window. Rendered relative to the viewer's own view so
+   coords line up. `room` = [sheet-id branch]."
+  [viewer-sid room]
   (let [view (session-view viewer-sid)
-        sh   (:sh (@sheets* sheet-id))]
+        sh   (:sh (@sheets* room))]
     (apply str
            (for [[sid s] @sessions*
-                 :when (and (not= sid viewer-sid) (= sheet-id (:sheet s))
+                 :when (and (not= sid viewer-sid) (= room (:room s))
                             (:cursor s) (in-window? view (:cursor s)))]
              (peer-marker sh view s)))))
 
 (defn- self-html
   "THIS session's own selection / editing marker for its #self overlay, rendered
    window-relative to its own view. Empty when there is no cursor or it scrolled
-   out of the window."
-  [sid sheet-id]
+   out of the window. `room` = [sheet-id branch]."
+  [sid room]
   (let [s    (@sessions* sid)
         view (session-view sid)
         a    (:cursor s)
-        sh   (:sh (@sheets* sheet-id))]
-    (if (and s sh (= sheet-id (:sheet s)) a (in-window? view a))
+        sh   (:sh (@sheets* room))]
+    (if (and s sh (= room (:room s)) a (in-window? view a))
       (let [{:keys [ci ri]} (addr/parse a)
             [cb rb] (view-base view)]
         (str (h/html
@@ -1081,51 +1173,53 @@
       "")))
 
 (defn- broadcast-presence!
-  "Re-render the #peers overlay for every session on the sheet (each scoped to
-   its own view). Called whenever any cursor / editing state changes."
-  [sheet-id]
+  "Re-render the #peers overlay for every session in `room` (each scoped to its
+   own view). Called whenever any cursor / editing state changes."
+  [room]
   (doseq [[sid s] @sessions*]
-    (when (and (= sheet-id (:sheet s)) (:gen s))
-      (try (d*/lock-sse! (:gen s) (patch-inner! (:gen s) "#peers" (peers-html sid sheet-id)))
+    (when (and (= room (:room s)) (:gen s))
+      (try (d*/lock-sse! (:gen s) (patch-inner! (:gen s) "#peers" (peers-html sid room)))
            (when (:webkit? s) (webkit-flush! sid))
            (catch Throwable _ (reap-session! sid))))))
 
 (defn- render-window!
   "Push the full visible window for `view` to `gen`: cells, both header strips,
    the #meta totals, and this session's own overlays. Used after a scroll (/view)
-   and after an axis resize (/size), where every position in the window shifts."
-  [gen sid sheet-id sh view]
+   and after an axis resize (/size), where every position in the window shifts.
+   `room` = [sheet-id branch]."
+  [gen sid room sh view]
   (let [[cis ris] (window (:r0 view) (:c0 view))]
     (patch-inner! gen "#cells"   (cells-html sh cis ris))
     (patch-inner! gen "#colhead" (colhead-html sh cis))
     (patch-inner! gen "#rowhead" (rowhead-html sh ris))
     (d*/patch-elements! gen (meta-html sh (:r0 view) (:c0 view)))   ; #meta by id
-    (patch-inner! gen "#self"  (self-html sid sheet-id))
-    (patch-inner! gen "#peers" (peers-html sid sheet-id))))
+    (patch-inner! gen "#self"  (self-html sid room))
+    (patch-inner! gen "#peers" (peers-html sid room))))
 
 (defn- broadcast-window!
-  "A resize shifts every position, so re-render each OTHER session's whole window
-   on its own stream (scoped to that session's view)."
-  [editor-sid sheet-id sh]
+  "A resize shifts every position, so re-render each OTHER session in the room's
+   whole window on its own stream (scoped to that session's view)."
+  [editor-sid room sh]
   (doseq [[sid s] @sessions*]
-    (when (and (not= sid editor-sid) (= sheet-id (:sheet s)) (:gen s))
-      (try (d*/lock-sse! (:gen s) (render-window! (:gen s) sid sheet-id sh (:view s)))
+    (when (and (not= sid editor-sid) (= room (:room s)) (:gen s))
+      (try (d*/lock-sse! (:gen s) (render-window! (:gen s) sid room sh (:view s)))
            (when (:webkit? s) (webkit-flush! sid))
            (catch Throwable _ (reap-session! sid))))))
 
 (defn- locked-by-other?
-  "Is `cell` currently being edited by some session other than `sid`?"
-  [sid sheet-id cell]
+  "Is `cell` currently being edited by some other session IN THE SAME ROOM?"
+  [sid room cell]
   (boolean (some (fn [[k s]]
-                   (and (not= k sid) (= sheet-id (:sheet s)) (= (:editing s) cell)))
+                   (and (not= k sid) (= room (:room s)) (= (:editing s) cell)))
                  @sessions*)))
 
 ;; --- definitions library (per-chunk, collaboratively locked) ------------
 
 (defn- def-editor-of
-  "The sid currently editing definition chunk `id` on `sheet-id`, or nil."
-  [sheet-id id]
-  (some (fn [[k s]] (when (and (= sheet-id (:sheet s)) (= (:editdef s) id)) k))
+  "The sid currently editing definition chunk `id` in `room`, or nil. (Defs are
+   per-branch, so the lock is per-room.)"
+  [room id]
+  (some (fn [[k s]] (when (and (= room (:room s)) (= (:editdef s) id)) k))
         @sessions*))
 
 (defn- def-names
@@ -1149,9 +1243,9 @@
    delete. Edit (`/deflock`) expands it (tier 2) into a textarea bound to $defsrc
    with Save / Cancel and a ⤢ that opens the shared big editor (tier 3). A chunk
    held by another session shows a lock badge and stays collapsed. `sid` may be
-   nil (initial page render: all read-only, no own-edit)."
-  [sid sheet-id]
-  (let [sh     (:sh (@sheets* sheet-id))
+   nil (initial page render: all read-only, no own-edit). `room` = [sheet-id branch]."
+  [sid room]
+  (let [sh     (:sh (@sheets* room))
         chunks (when sh (sheet/defs sh))
         card   "border:1px solid var(--grid);border-radius:6px;padding:.45rem .6rem;margin:.4rem 0;"
         row    "display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;"
@@ -1165,7 +1259,7 @@
              [:p {:style "font:13px sans-serif;color:var(--muted);margin:.3rem 0;"}
               "No definitions yet — add one below."]
              (for [{:keys [id src edited]} chunks
-                   :let [editor (def-editor-of sheet-id id)
+                   :let [editor (def-editor-of room id)
                          mine?  (and sid (= editor sid))]]
                [:div {:style card}
                 (cond
@@ -1231,27 +1325,27 @@
                             "$bigwhat==='style' ? ($stylesrc=$big, $cell=$sel, @post('/style')) : "
                             "($defsrc=$big, @post('/defsave'))), $bigedit=false")} "Apply"]]]]))))
 
-(defn- push-deflib! [gen sid sheet-id]
-  (patch-inner! gen "#deflib" (deflib-html sid sheet-id)))
+(defn- push-deflib! [gen sid room]
+  (patch-inner! gen "#deflib" (deflib-html sid room)))
 
 (defn- broadcast-deflib!
-  "Re-render #deflib for every session on the sheet (each its own view, since
-   lock badges + the editable card are per session). Used when the library or a
-   lock changes, and on reap to release a departed editor's lock."
-  [sheet-id]
+  "Re-render #deflib for every session in `room` (each its own view, since lock
+   badges + the editable card are per session). Used when the library or a lock
+   changes, and on reap to release a departed editor's lock."
+  [room]
   (doseq [[sid s] @sessions*]
-    (when (and (= sheet-id (:sheet s)) (:gen s))
-      (try (d*/lock-sse! (:gen s) (patch-inner! (:gen s) "#deflib" (deflib-html sid sheet-id)))
+    (when (and (= room (:room s)) (:gen s))
+      (try (d*/lock-sse! (:gen s) (patch-inner! (:gen s) "#deflib" (deflib-html sid room)))
            (when (:webkit? s) (webkit-flush! sid))
            (catch Throwable _ (reap-session! sid))))))
 
 (defn- broadcast-deflib-except!
   "Like broadcast-deflib! but skips `except-sid` (whose own #deflib the calling
    handler already patched on its one-shot response)."
-  [except-sid sheet-id]
+  [except-sid room]
   (doseq [[sid s] @sessions*]
-    (when (and (not= sid except-sid) (= sheet-id (:sheet s)) (:gen s))
-      (try (d*/lock-sse! (:gen s) (patch-inner! (:gen s) "#deflib" (deflib-html sid sheet-id)))
+    (when (and (not= sid except-sid) (= room (:room s)) (:gen s))
+      (try (d*/lock-sse! (:gen s) (patch-inner! (:gen s) "#deflib" (deflib-html sid room)))
            (when (:webkit? s) (webkit-flush! sid))
            (catch Throwable _ (reap-session! sid))))))
 
@@ -1280,54 +1374,68 @@
   [uid id token rec]
   (if (= uid (:owner rec)) :read-write (db/access-level uid id token)))
 
+(defn- sig-branch
+  "The validated branch from request signals ($branch), defaulting to db/MAIN."
+  [sig]
+  (let [b (:branch sig)] (if (store/valid-branch? b) b db/MAIN)))
+
 (defn- with-access
   "POST handlers: resolve the signed-in user and sheet access from the request
-   signals (the link token rides in $link). On success open the one-shot SSE
-   response and call (f uid sheet-id rec sig gen); otherwise raise the
-   access/auth error toast. The rec handed to `f` carries the effective `:level`."
+   signals (the link token rides in $link, the branch in $branch). On success
+   open the one-shot SSE response and call (f uid sheet-id rec sig gen);
+   otherwise raise the access/auth error toast. The rec handed to `f` carries the
+   effective `:level`, the link `:token`, and the resolved `:branch`/`:room`."
   [req f]
   (let [uid      (auth/req->uid req)
         sig      (read-signals req)
         sheet-id (:sheet sig)
+        branch   (sig-branch sig)
         token    (not-empty (str (:link sig)))
-        rec      (accessible-rec uid sheet-id token)]
+        rec      (accessible-rec uid sheet-id branch token)]
     (if-not rec
       (deny req (if uid "no access to this sheet" "not signed in"))
-      (let [rec (assoc rec :level (level-of uid sheet-id token rec) :token token)]
+      (let [rec (assoc rec :level (level-of uid sheet-id token rec) :token token
+                       :branch branch :room [sheet-id branch])]
         (sse req (fn [gen] (f uid sheet-id rec sig gen)))))))
 
 (defn- with-owner
   "Like `with-access`, but requires the user to OWN the (already-loaded) sheet —
-   for owner-only actions such as sharing."
+   for owner-only actions such as sharing/branching. The rec carries
+   `:branch`/`:room` like with-access."
   [req f]
   (let [uid      (auth/req->uid req)
         sig      (read-signals req)
         sheet-id (:sheet sig)
-        rec      (when (store/valid-id? (str sheet-id)) (@sheets* sheet-id))]
+        branch   (sig-branch sig)
+        rec      (when (store/valid-id? (str sheet-id)) (@sheets* [sheet-id branch]))]
     (if-not (and uid rec (= uid (:owner rec)))
       (deny req "only the owner can do this")
-      (sse req (fn [gen] (f uid sheet-id rec sig gen))))))
+      (let [rec (assoc rec :branch branch :room [sheet-id branch])]
+        (sse req (fn [gen] (f uid sheet-id rec sig gen)))))))
 
 (defn- with-stream-access
   "The persistent /stream GET. It is opened with Datastar's @get, so identity +
-   sheet + link token all ride in the request SIGNALS ($sid/$sheet/$link), not
-   the URL path. On success call (f uid sid sheet-id token) — which returns its
-   OWN long-lived SSE response; otherwise a plain 403."
+   sheet + link token + branch all ride in the request SIGNALS
+   ($sid/$sheet/$link/$branch), not the URL path. On success call
+   (f uid sid sheet-id branch token) — which returns its OWN long-lived SSE
+   response; otherwise a plain 403."
   [req f]
   (let [uid      (auth/req->uid req)
         sig      (read-signals req)
         sid      (:sid sig)
         sheet-id (:sheet sig)
+        branch   (sig-branch sig)
         token    (not-empty (str (:link sig)))]
-    (if-not (accessible-rec uid sheet-id token)
+    (if-not (accessible-rec uid sheet-id branch token)
       {:status 403 :body "no access"}
-      (f uid sid sheet-id token))))
+      (f uid sid sheet-id branch token))))
 
 (defn- push-changes!
   "Render `affected` cells back to the editor (one-shot SSE), toast any value /
-   style errors, and broadcast the same cells to collaborators. Shared by /cell
-   and /style — both just compute an affected set and hand it here."
-  [gen sid sheet-id sh affected]
+   style errors, and broadcast the same cells to collaborators in the room.
+   Shared by /cell and /style — both just compute an affected set and hand it
+   here. `room` = [sheet-id branch]."
+  [gen sid room sh affected]
   (let [affected (sort (distinct affected))
         view     (session-view sid)
         visible  (filter #(in-window? view %) affected)
@@ -1340,7 +1448,7 @@
     (when (seq visible)
       (d*/patch-elements! gen (render-cells sh visible view)))
     (signals! gen {:err (if (seq errs) (str/join "; " errs) "")})
-    (broadcast! sid sheet-id sh affected)))
+    (broadcast! sid room sh affected)))
 
 ;; --- per-session undo/redo --------------------------------------------------
 ;; Each session (≈ a tab) keeps a stack of the edits IT made; the selective-undo
@@ -1364,7 +1472,7 @@
 (defn- handle-undo* [req dir]
   (with-access req
     (fn [uid sheet-id rec {:keys [sid]} gen]
-      (ensure-session! sid sheet-id uid (:token rec))
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
       (if (not= :read-write (:level rec))
         (signals! gen {:err "read-only access — you can't edit this sheet"})
         (let [sh (:sh rec)
@@ -1374,10 +1482,10 @@
                       {:keys [stacks affected]}
                       (sheet/undo-step sh {:undo (:undo s) :redo (:redo s)} dir)]
                   (swap! sessions* update sid assoc :undo (:undo stacks) :redo (:redo stacks))
-                  (when affected (sheet/settle! sh) (save-rec! sheet-id uid))
+                  (when affected (sheet/settle! sh) (save-rec! (:room rec) uid))
                   affected))]
           (if affected
-            (push-changes! gen sid sheet-id sh affected)
+            (push-changes! gen sid (:room rec) sh affected)
             (signals! gen {:err ""})))))))           ; nothing (un)doable — silent
 
 (defn- handle-undo [req] (handle-undo* req :undo))
@@ -1386,21 +1494,21 @@
 (defn- handle-cell [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [cell v sid]} gen]
-      (ensure-session! sid sheet-id uid (:token rec))   ; lazy re-register + keep alive
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))   ; lazy re-register + keep alive
       (if (not= :read-write (:level rec))
         (signals! gen {:err "read-only access — you can't edit this sheet"})
         (let [sh (:sh rec)]
           (when (addr/valid? cell)
             (locking edit-lock
             (try
-              (when (locked-by-other? sid sheet-id cell)
+              (when (locked-by-other? sid (:room rec) cell)
                 (throw (ex-info "locked by another collaborator" {:locked cell})))
               (let [before (sheet/raw sh cell)]
                 (sheet/set-cell! sh cell (str v))
                 (sheet/settle! sh)
                 (record-edit! sid cell :value before (sheet/raw sh cell)))
-              (save-rec! sheet-id uid)              ; autosave (source + meta)
-              (push-changes! gen sid sheet-id sh
+              (save-rec! (:room rec) uid)              ; autosave (source + meta)
+              (push-changes! gen sid (:room rec) sh
                              (cons cell (into (sheet/dependents* sh cell)
                                               (sheet/style-dependents sh cell))))
               (catch Throwable e
@@ -1409,7 +1517,7 @@
 (defn- handle-style [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [cell sid] :as sig} gen]
-      (ensure-session! sid sheet-id uid (:token rec))
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
       (let [sh   (:sh rec)
             prop (keyword (:styleprop sig))
             src  (str (:stylesrc sig))]
@@ -1427,10 +1535,10 @@
                 (sheet/set-style! sh cell prop src)
                 (sheet/settle! sh)
                 (record-edit! sid cell prop before (get (sheet/style-srcs sh cell) prop)))
-              (save-rec! sheet-id uid)
+              (save-rec! (:room rec) uid)
               ;; only the styled cell re-renders now; style refs to OTHER cells
               ;; just register the edge for future value changes.
-              (push-changes! gen sid sheet-id sh [cell])
+              (push-changes! gen sid (:room rec) sh [cell])
               (catch Throwable e
                 (signals! gen {:err (str cell " " (name prop) " style: "
                                          (pretty-err (.getMessage e)))})))))))))
@@ -1457,7 +1565,7 @@
   [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [sid selcells]} gen]
-      (ensure-session! sid sheet-id uid (:token rec))
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
       (if (not= :read-write (:level rec))
         (signals! gen {:err "read-only access — you can't edit this sheet"})
         (let [sh    (:sh rec)
@@ -1473,8 +1581,8 @@
                       (record-edit! sid c :value before nil)))
                   (when (seq @affected)
                     (sheet/settle! sh)
-                    (save-rec! sheet-id uid)
-                    (push-changes! gen sid sheet-id sh (distinct @affected))))
+                    (save-rec! (:room rec) uid)
+                    (push-changes! gen sid (:room rec) sh (distinct @affected))))
                 (catch Throwable e
                   (signals! gen {:err (pretty-err (.getMessage e))}))))))))))
 
@@ -1501,7 +1609,7 @@
 (defn- handle-copy [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [sid selcells]} gen]
-      (ensure-session! sid sheet-id uid (:token rec))
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
       (when-let [clip (capture-clip (:sh rec) selcells)]
         (swap! sessions* assoc-in [sid :clip] clip))
       (signals! gen {:err ""}))))                  ; copy is silent (like everywhere)
@@ -1526,7 +1634,7 @@
 (defn- handle-paste [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [sid selcells]} gen]
-      (ensure-session! sid sheet-id uid (:token rec))
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
       (if (not= :read-write (:level rec))
         (signals! gen {:err "read-only access — you can't edit this sheet"})
         (let [sh   (:sh rec)
@@ -1537,15 +1645,15 @@
               (try
                 (let [affected (paste-cells! sh sid clip (first tgt) (second tgt))]
                   (when (seq affected)
-                    (sheet/settle! sh) (save-rec! sheet-id uid)
-                    (push-changes! gen sid sheet-id sh affected)))
+                    (sheet/settle! sh) (save-rec! (:room rec) uid)
+                    (push-changes! gen sid (:room rec) sh affected)))
                 (catch Throwable e
                   (signals! gen {:err (pretty-err (.getMessage e))}))))))))))
 
 (defn- handle-cut [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [sid selcells]} gen]
-      (ensure-session! sid sheet-id uid (:token rec))
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
       (if (not= :read-write (:level rec))
         (signals! gen {:err "read-only access — you can't edit this sheet"})
         (when-let [clip (capture-clip (:sh rec) selcells)]
@@ -1560,27 +1668,27 @@
                     (sheet/set-cell! sh a "")
                     (record-edit! sid a :value value nil))
                   (when (seq @affected)
-                    (sheet/settle! sh) (save-rec! sheet-id uid)
-                    (push-changes! gen sid sheet-id sh (distinct @affected))))
+                    (sheet/settle! sh) (save-rec! (:room rec) uid)
+                    (push-changes! gen sid (:room rec) sh (distinct @affected))))
                 (catch Throwable e
                   (signals! gen {:err (pretty-err (.getMessage e))}))))))))))
 
 (defn- handle-view [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [r0 c0 sid]} gen]
-      (ensure-session! sid sheet-id uid (:token rec))   ; lazy re-register + keep alive
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))   ; lazy re-register + keep alive
       (let [sh   (:sh rec)
             view {:r0 (max 0 (long (or r0 0))) :c0 (max 0 (long (or c0 0)))}]
         (set-session-view! sid view)
         ;; logical scroll: always cheap inner patches. The window is positioned
         ;; relative to (c0,r0); /app.js translates + sizes the scrollbars from
         ;; #meta totals (no giant spacer to resize).
-        (render-window! gen sid sheet-id sh view)))))
+        (render-window! gen sid (:room rec) sh view)))))
 
 (defn- handle-size [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [sid rzcmd]} gen]
-      (ensure-session! sid sheet-id uid (:token rec))
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
       (let [sh (:sh rec)
             [axis idx size] (str/split (str rzcmd) #":")
             i (parse-long (str idx))
@@ -1598,10 +1706,10 @@
               (case axis
                 "col" (sheet/set-col-width!  sh i s)
                 "row" (sheet/set-row-height! sh i s))
-              (save-rec! sheet-id uid)
+              (save-rec! (:room rec) uid)
               ;; positions across the whole window shift -> full re-render
-              (render-window! gen sid sheet-id sh (session-view sid))
-              (broadcast-window! sid sheet-id sh)
+              (render-window! gen sid (:room rec) sh (session-view sid))
+              (broadcast-window! sid (:room rec) sh)
               (catch Throwable e
                 (signals! gen {:err (pretty-err (.getMessage e))})))))))))
 
@@ -1613,7 +1721,7 @@
   [req]
   (with-owner req
     (fn [uid sheet-id rec {:keys [sid pcw prh]} gen]
-      (ensure-session! sid sheet-id uid (:token rec))
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
       (let [sh (:sh rec)
             w  (parse-long (str pcw))
             h  (parse-long (str prh))]
@@ -1621,11 +1729,11 @@
           (try
             (when (and w (pos? w)) (sheet/set-default-col-w! sh w))
             (when (and h (pos? h)) (sheet/set-default-row-h! sh h))
-            (save-rec! sheet-id uid)
+            (save-rec! (:room rec) uid)
             (signals! gen {:pcw (str (sheet/default-col-w sh))
                            :prh (str (sheet/default-row-h sh)) :err ""})
-            (render-window! gen sid sheet-id sh (session-view sid))
-            (broadcast-window! sid sheet-id sh)
+            (render-window! gen sid (:room rec) sh (session-view sid))
+            (broadcast-window! sid (:room rec) sh)
             (catch Throwable e
               (signals! gen {:err (pretty-err (.getMessage e))}))))))))
 
@@ -1649,30 +1757,30 @@
   [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [sid defid]} gen]
-      (ensure-session! sid sheet-id uid (:token rec))
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
       (let [sh    (:sh rec)
             chunk (first (filter #(= (:id %) defid) (sheet/defs sh)))]
         (guard-rw rec gen
           (fn []
             (cond
               (nil? chunk)                       (signals! gen {:err ""})
-              (def-editor-of sheet-id defid)     (signals! gen {:err "that definition is being edited by someone else"})
+              (def-editor-of (:room rec) defid)     (signals! gen {:err "that definition is being edited by someone else"})
               :else
               (do (swap! sessions* assoc-in [sid :editdef] defid)
                   (signals! gen {:defid defid :defsrc (:src chunk) :err ""})
-                  (push-deflib! gen sid sheet-id)
-                  (broadcast-deflib-except! sid sheet-id)))))))))
+                  (push-deflib! gen sid (:room rec))
+                  (broadcast-deflib-except! sid (:room rec))))))))))
 
 (defn- handle-defunlock
   "Release this session's edit lock without saving."
   [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [sid]} gen]
-      (ensure-session! sid sheet-id uid (:token rec))
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
       (swap! sessions* assoc-in [sid :editdef] nil)
       (signals! gen {:defid "" :defsrc ""})
-      (push-deflib! gen sid sheet-id)
-      (broadcast-deflib-except! sid sheet-id))))
+      (push-deflib! gen sid (:room rec))
+      (broadcast-deflib-except! sid (:room rec)))))
 
 (defn- handle-defsave
   "Save the held chunk's new source ($defsrc), release the lock, recompile. A
@@ -1681,22 +1789,22 @@
   [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [sid defid defsrc]} gen]
-      (ensure-session! sid sheet-id uid (:token rec))
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
       (let [sh (:sh rec)]
         (guard-rw rec gen
           (fn []
-            (if (not= sid (def-editor-of sheet-id defid))
+            (if (not= sid (def-editor-of (:room rec) defid))
               (signals! gen {:err "you no longer hold this definition's lock"})
               (locking edit-lock
                 (try
                   (let [{:keys [errors]} (sheet/update-def! sh defid (str defsrc))]
                     (swap! sessions* assoc-in [sid :editdef] nil)
-                    (save-rec! sheet-id uid)
+                    (save-rec! (:room rec) uid)
                     (signals! gen {:defid "" :defsrc "" :err (def-errs-msg errors)})
-                    (render-window! gen sid sheet-id sh (session-view sid))
-                    (broadcast-window! sid sheet-id sh)
-                    (push-deflib! gen sid sheet-id)
-                    (broadcast-deflib-except! sid sheet-id))
+                    (render-window! gen sid (:room rec) sh (session-view sid))
+                    (broadcast-window! sid (:room rec) sh)
+                    (push-deflib! gen sid (:room rec))
+                    (broadcast-deflib-except! sid (:room rec)))
                   (catch Throwable e
                     (signals! gen {:err (str "definition error: " (pretty-err (.getMessage e)))})))))))))))
 
@@ -1705,26 +1813,26 @@
   [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [sid]} gen]
-      (ensure-session! sid sheet-id uid (:token rec))
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
       (let [sh (:sh rec)]
         (guard-rw rec gen
           (fn []
             (locking edit-lock
               (let [{:keys [id]} (sheet/add-def! sh "")]
                 (swap! sessions* assoc-in [sid :editdef] id)
-                (save-rec! sheet-id uid)
+                (save-rec! (:room rec) uid)
                 (signals! gen {:defid id :defsrc "" :err ""})
-                (push-deflib! gen sid sheet-id)
-                (broadcast-deflib-except! sid sheet-id)))))))))
+                (push-deflib! gen sid (:room rec))
+                (broadcast-deflib-except! sid (:room rec))))))))))
 
 (defn- handle-defdel
   "Delete chunk $defid (unless another session is editing it) and recompile."
   [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [sid defid]} gen]
-      (ensure-session! sid sheet-id uid (:token rec))
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
       (let [sh     (:sh rec)
-            editor (def-editor-of sheet-id defid)]
+            editor (def-editor-of (:room rec) defid)]
         (guard-rw rec gen
           (fn []
             (if (and editor (not= editor sid))
@@ -1734,12 +1842,12 @@
                   (let [{:keys [errors]} (sheet/remove-def! sh defid)]
                     (when (= defid (get-in @sessions* [sid :editdef]))
                       (swap! sessions* assoc-in [sid :editdef] nil))
-                    (save-rec! sheet-id uid)
+                    (save-rec! (:room rec) uid)
                     (signals! gen {:defid "" :defsrc "" :err (def-errs-msg errors)})
-                    (render-window! gen sid sheet-id sh (session-view sid))
-                    (broadcast-window! sid sheet-id sh)
-                    (push-deflib! gen sid sheet-id)
-                    (broadcast-deflib-except! sid sheet-id))
+                    (render-window! gen sid (:room rec) sh (session-view sid))
+                    (broadcast-window! sid (:room rec) sh)
+                    (push-deflib! gen sid (:room rec))
+                    (broadcast-deflib-except! sid (:room rec)))
                   (catch Throwable e
                     (signals! gen {:err (pretty-err (.getMessage e))})))))))))))
 
@@ -1754,7 +1862,7 @@
   [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [sel edit sid]} gen]
-      (ensure-session! sid sheet-id uid (:token rec))
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
       (let [can-write? (= :read-write (:level rec))]
         (swap! sessions* update sid assoc
                :cursor  (when (addr/valid? sel) sel)
@@ -1763,8 +1871,8 @@
                :editing (when (and edit can-write? (addr/valid? sel)) sel)))
       ;; peers' #peers via their persistent streams; this session's #self via
       ;; the one-shot @post response (the gen this gate opened).
-      (broadcast-presence! sheet-id)
-      (patch-inner! gen "#self" (self-html sid sheet-id)))))
+      (broadcast-presence! (:room rec))
+      (patch-inner! gen "#self" (self-html sid (:room rec))))))
 
 ;; Session lifecycle. The persistent /stream registers the session and stores
 ;; its push generator (server -> client collaboration channel). Cleanup never
@@ -1778,8 +1886,9 @@
    edits elsewhere can be pushed here. Stays open — never close-sse! on open."
   [req]
   (with-stream-access req
-    (fn [uid sid sheet-id token]
-      (let [webkit? (webkit-ua? (get-in req [:headers "user-agent"]))]
+    (fn [uid sid sheet-id branch token]
+      (let [webkit? (webkit-ua? (get-in req [:headers "user-agent"]))
+            room    [sheet-id branch]]
        (hk/->sse-response req
         (sse-opts
         {hk/on-open
@@ -1787,7 +1896,7 @@
            (when (and sid (re-matches sid-re sid))
              ;; reconnect: keep the existing session's view/dims, just swap the
              ;; (dead) generator for the new one. fresh connect: register.
-             (ensure-session! sid sheet-id uid token)
+             (ensure-session! sid sheet-id branch uid token)
              ;; note the engine so collaboration pushes get the WebKit flush tick
              (swap! sessions* update sid assoc :gen gen :webkit? webkit?)
              ;; flush once so the client sees an established, open stream (an SSE
@@ -1795,10 +1904,10 @@
              (try (d*/patch-signals! gen "{}") (catch Throwable _))
              ;; restore this session's own marker (reconnect) and show it the
              ;; cursors already present (and vice versa).
-             (try (patch-inner! gen "#self" (self-html sid sheet-id)) (catch Throwable _))
+             (try (patch-inner! gen "#self" (self-html sid room)) (catch Throwable _))
              ;; show this session the current definitions library + lock state
-             (try (push-deflib! gen sid sheet-id) (catch Throwable _))
-             (broadcast-presence! sheet-id)))}))))))
+             (try (push-deflib! gen sid room) (catch Throwable _))
+             (broadcast-presence! room)))}))))))
 
 (defn- handle-session-end [req]
   (let [uid (auth/req->uid req)
@@ -1909,8 +2018,8 @@
    Re-renders #sharebar and evicts anyone who just lost access."
   [req]
   (with-owner req
-    (fn [uid sheet-id _rec {:keys [sid shareact plevel gtarget glevel grantee]} gen]
-      (ensure-session! sid sheet-id uid)
+    (fn [uid sheet-id rec {:keys [sid shareact plevel gtarget glevel grantee]} gen]
+      (ensure-session! sid sheet-id (:branch rec) uid)
       (let [err (case (str shareact)
                   "link"   (do (db/set-link-level! sheet-id (level-kw plevel)) nil)
                   "rotate" (do (db/rotate-link! sheet-id) nil)
@@ -1923,10 +2032,54 @@
                                  (db/remove-share! sheet-id grantee :user))
                                nil)
                   nil)]
-        (save-rec! sheet-id uid)
+        (save-rec! (:room rec) uid)
         (evict-unauthorized! sheet-id)
         (d*/patch-elements! gen (share-html uid sheet-id nil))
         (signals! gen {:err (or err "") :gtarget ""})))))
+
+(defn- handle-branch
+  "Owner-only branch ops, dispatched on $branchact:
+   - fork:   create branch $bname as a copy of the CURRENT branch (records fork
+             lineage in db/fork-branch!), then $goto the new branch.
+   - delete: drop the current (non-main) branch and $goto main. The in-memory
+             room is discarded WITHOUT an autosave (else unload-sheet! would
+             re-persist — resurrect — the just-deleted cells).
+   Switching branches is a plain client navigation (the picker) — not here."
+  [req]
+  (with-owner req
+    (fn [uid sheet-id rec {:keys [sid branchact bname]} gen]
+      (ensure-session! sid sheet-id (:branch rec) uid)
+      (let [branch    (:branch rec)
+            [_ sname] (store/split-id sheet-id)
+            base      (str "/?s=" sname)]          ; owners reach their sheet by ?s=
+        (case (str branchact)
+          "fork"
+          (let [to (str bname)]
+            (cond
+              (not (store/valid-branch? to))
+              (signals! gen {:err "branch name: letters, digits and - only (max 32)"})
+              (= to db/MAIN)
+              (signals! gen {:err "\"main\" is reserved"})
+              (db/branch-exists? sheet-id to)
+              (signals! gen {:err (str "branch \"" to "\" already exists")})
+              :else
+              (do
+                (save-rec! (:room rec) uid)         ; flush source state before copying
+                (db/fork-branch! sheet-id branch to)
+                (signals! gen {:err "" :bname "" :branchpanel false
+                               :goto (str base "&b=" to)}))))
+          "delete"
+          (if (= branch db/MAIN)
+            (signals! gen {:err "the main branch can't be deleted"})
+            (do
+              (db/delete-branch! sheet-id branch)
+              ;; discard the in-memory engine for this room so its eventual unload
+              ;; can't re-save the deleted cells; sessions still here get denied on
+              ;; their next request and reload to main.
+              (when-let [{:keys [sh]} (@sheets* (:room rec))] (sheet/close! sh))
+              (swap! sheets* dissoc (:room rec))
+              (signals! gen {:err "" :branchpanel false :goto base})))
+          (signals! gen {:err ""}))))))
 
 ;; --- auth routes (login page, OAuth redirects, logout) -------------------
 
@@ -2036,10 +2189,16 @@
                           (let [sname (let [s (qparam req "s")] (if (store/valid-name? s) s "default"))
                                 owner (let [o (qparam req "u")] (when (and o (re-matches auth/uid-re o)) o))]
                             [(store/storage-id (or owner uid) sname) sname]))
-            rec         (when id (accessible-rec uid id token))]
+            ;; the working branch rides in &b= (default MAIN). A stale/typo'd or
+            ;; deleted branch silently falls back to main (creation is explicit
+            ;; via fork) rather than 403-ing the whole sheet.
+            branch      (let [b (qparam req "b")
+                              b (if (store/valid-branch? b) b db/MAIN)]
+                          (if (and id (db/branch-exists? id b)) b db/MAIN))
+            rec         (when id (accessible-rec uid id branch token))]
         (if rec
           {:status 200 :headers {"Content-Type" "text/html"}
-           :body (page (:sh rec) id sname uid token)}
+           :body (page (:sh rec) id sname branch uid token)}
           {:status 403 :headers {"Content-Type" "text/html"}
            :body (denied-page uid)})))))
 
@@ -2104,6 +2263,7 @@
     [:post "/view"]       (handle-view req)
     [:post "/presence"]   (handle-presence req)
     [:post "/share"]      (handle-share req)
+    [:post "/branch"]     (handle-branch req)
     {:status 404 :body "not found"})))
 
 (defn port

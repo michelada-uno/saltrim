@@ -253,9 +253,17 @@ geometry code shared as `.cljc`, and the old hidden-trigger UI replaced by a
 Datastar-attribute + custom-event bridge.
 
 **What's next lives in `ROADMAP.md`** (single source). SCI, per-sheet ns,
-**JS → CLJS**, **cells → Datahike** (the boss-fight storage move), and **per-user
+**JS → CLJS**, **cells → Datahike** (the boss-fight storage move), **per-user
 selective undo/redo** (`Ctrl+Z`/`Ctrl+Shift+Z`/`Ctrl+Y` → `sheet/undo-step`;
-per-session stack in `web`) are all DONE; the branch dimension exists (`"main"`)
-but branch/merge/as-of UI is not built yet. Remaining: collapsible-toolbar UI,
-multi-selection + cut/copy/paste, the branching UI. Cheap wins: dependency-graph
-view, cell assertions. See `TECHDEBT.md` for deferred items.
+per-session stack in `web`), collapsible-toolbar UI, multi-selection +
+cut/copy/paste are all DONE. **Branching — switch + fork (PR A)** is DONE: the
+web runtime keys every loaded engine + collaboration broadcast on a
+`(sheet, branch)` **room** (sessions carry `:room`; broadcasts filter on it), so
+users on different branches don't see each other's cells; `&b=`/`$branch` pick
+the working branch (bad/deleted → main); a branch picker switches, an owner-only
+🌿 modal forks (`db/fork-branch!`, recording `:branch/parent`+`:branch/base-tx`
+lineage) or deletes (`db/delete-branch!`, no resurrection) via `/branch`, with a
+`$goto` signal + `data-effect` to navigate. **Next: merge (PR B)** — 3-way vs the
+recorded fork point, surface conflicts. Then optional as-of viewing (PR C). Cheap
+wins: dependency-graph view, cell assertions. See `TECHDEBT.md` for deferred
+items.

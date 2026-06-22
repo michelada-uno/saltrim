@@ -202,3 +202,59 @@
   (db/ensure-sheet! "dev-ann__b" "dev-ann" "b")
   (is (= ["dev-ann__a" "dev-ann__b"] (db/sheets-of-owner "dev-ann")))
   (is (empty? (db/sheets-of-owner "dev-nobody"))))
+
+(deftest branch-names-exists-and-listing
+  (db/upsert-user! {:uid "dev-ann" :name "Ann"})
+  (db/ensure-sheet! S "dev-ann" "s")
+  (db/save-doc! S {"A1" {:value "1"}} "dev-ann")
+  (testing "main always exists / lists, even with no :branch entity"
+    (is (db/branch-exists? S "main"))
+    (is (= ["main"] (db/branch-names S))))
+  (testing "an unknown branch does not exist"
+    (is (not (db/branch-exists? S "nope"))))
+  (testing "a fork shows up in names + exists"
+    (db/fork-branch! S "main" "exp")
+    (is (db/branch-exists? S "exp"))
+    (is (= ["exp" "main"] (db/branch-names S)))))
+
+(deftest fork-records-lineage
+  (db/upsert-user! {:uid "dev-ann" :name "Ann"})
+  (db/ensure-sheet! S "dev-ann" "s")
+  (db/save-doc! S {"A1" {:value "10"}} "dev-ann")
+  (db/fork-branch! S "main" "exp")
+  (let [m (d/pull @db/conn [:branch/parent :branch/base-tx]
+                  [:branch/key (str S "|exp")])]
+    (is (= "main" (:branch/parent m)) "records the parent branch")
+    (is (integer? (:branch/base-tx m)) "records the fork-point tx (a long)"))
+  (testing "the recorded base-tx reconstructs the fork-point doc via as-of"
+    (let [base (:branch/base-tx (d/pull @db/conn [:branch/base-tx] [:branch/key (str S "|exp")]))]
+      ;; diverge BOTH branches after the fork
+      (db/save-doc! S "main" {"A1" {:value "999"}} "dev-ann")
+      (db/save-doc! S "exp"  {"A1" {:value "555"}} "dev-ann")
+      (is (= "999" (get-in (db/sheet-doc S "main") ["A1" :value])))
+      (is (= "555" (get-in (db/sheet-doc S "exp")  ["A1" :value])))
+      ;; as-of base = main at the fork instant = "10" (the common ancestor)
+      (let [as-of-doc (->> (d/q '[:find ?addr ?prop ?src :in $ ?sid ?br
+                                   :where [?sh :sheet/id ?sid] [?c :cellprop/sheet ?sh]
+                                          [?c :cellprop/branch ?br] [?c :cellprop/addr ?addr]
+                                          [?c :cellprop/prop ?prop] [?c :cellprop/src ?src]]
+                                 (d/as-of @db/conn base) S "main")
+                           (some (fn [[a p s]] (when (and (= a "A1") (= p :value)) s))))]
+        (is (= "10" as-of-doc) "as-of base-tx yields the pre-divergence value")))))
+
+(deftest delete-branch-isolation
+  (db/upsert-user! {:uid "dev-ann" :name "Ann"})
+  (db/ensure-sheet! S "dev-ann" "s")
+  (db/save-doc! S {"A1" {:value "1"} "B1" {:value "2"}} "dev-ann")
+  (db/fork-branch! S "main" "exp")
+  (db/save-doc! S "exp" {"A1" {:value "x"} "B1" {:value "y"} "C1" {:value "z"}} "dev-ann")
+  (testing "delete drops only the branch's datoms; main is untouched"
+    (let [removed (db/delete-branch! S "exp")]
+      (is (= 3 removed) "all exp cellprops removed")
+      (is (empty? (db/sheet-doc S "exp")) "exp doc now empty")
+      (is (not (db/branch-exists? S "exp")))
+      (is (= ["main"] (db/branch-names S)))
+      (is (= {"A1" {:value "1"} "B1" {:value "2"}} (db/sheet-doc S "main")) "main intact")))
+  (testing "main can't be deleted"
+    (is (nil? (db/delete-branch! S "main")))
+    (is (db/branch-exists? S "main"))))

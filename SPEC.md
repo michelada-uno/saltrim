@@ -114,9 +114,14 @@ await chain).
   built-in `:db/txInstant`.
 - Per-`(sheet, branch)` **content scalars** (axis-size defaults `dcw`/`drh`, the
   sparse `cols`/`rows` maps, the `defs` library) ride on a `:branch` entity as
-  longs + edn-string blobs. Branch `"main"` is the default; the branch dimension
-  is the seed of git-like branching (fork = copy a branch's cellprops; per-prop
-  `as-of` = Datahike history).
+  longs + edn-string blobs. Branch `"main"` (`db/MAIN`) is the default.
+- **Branches** are the git-like dimension. `store/load-record`/`save!` take a
+  `branch` (default `MAIN`). `db/fork-branch!` copies a branch's cellprops +
+  scalars under a new name and records the **fork lineage** on the new `:branch`
+  entity (`:branch/parent` + `:branch/base-tx` = the db's `:max-tx` at the fork
+  instant) so a later 3-way merge can reconstruct the common-ancestor document
+  via `as-of` base-tx. `db/branch-names`/`branch-exists?` list branches (MAIN
+  always exists); `db/delete-branch!` retracts a non-main branch's datoms.
 - `save!` is **diff-based** — it compares the runtime document against the db and
   transacts only changed props (+ retracts removed). Required: with
   `:keep-history? true`, re-asserting an unchanged datom is *not* a no-op (it logs
@@ -255,8 +260,11 @@ that the client `translate`s.
 ### Endpoints
 
 - `GET /` — page for `?s=<name>` (own sheet, default `default`) or
-  `?u=<owner>&s=<name>` (foreign shared sheet); redirects to `/login` when
+  `?u=<owner>&s=<name>` (foreign shared sheet); `&b=<branch>` picks the working
+  branch (default `main`, bad/deleted branch → main). Redirects to `/login` when
   unauthenticated, 403 page when denied.
+- `POST /branch` — owner-only branch op (`$branchact`: fork `$bname` from the
+  current `$branch`, or delete it); sets `$goto` to navigate on success.
 - `GET /login`, `GET /auth/<provider>[/callback]`, `GET /auth/dev?name=`,
   `POST /logout` — identity (see above).
 - `POST /share` — owner-only sharing mutation (`$shareact`: link / rotate /
@@ -278,8 +286,12 @@ that the client `translate`s.
 
 ### Sessions & sheet lifecycle
 
-- `sessions*` `{sid -> {:sheet :view :dims :gen :last-seen}}`. `sheets*`
-  `{id -> sheet}` (lazy load from disk).
+- The collaborative unit is a **room** = `[sheet-id branch]`: a branch is its own
+  working copy, so two users on different branches of the same sheet are isolated.
+  `sessions*` `{sid -> {:sheet :branch :room :view :dims :gen :last-seen}}`;
+  `sheets*` `{[id branch] -> sheet}` (lazy load per room). Every broadcast /
+  presence / lock / def-lock helper filters on `(= room (:room s))`; the share
+  ACL stays per-**sheet** (access grants all branches), so eviction is per-sheet.
 - Viewport is **per session** (concurrent clients keep independent scroll).
 - Acquire on `/stream` open; release on beacon `/session/end` **or** the TTL
   sweep (`SESSION-TTL-MS=30m`, `SWEEP-MS=60s`) — both call `reap-session!`, which
@@ -302,6 +314,20 @@ that the client `translate`s.
   element, so distinguishable from the `@post`s) re-dispatch `sr-open` with capped
   backoff (reset on `started`). `/stream` on-open keeps an existing session's view
   and just swaps in the new generator.
+
+### Branching (web)
+
+- The working branch rides in `&b=` (page) and `$branch` (every POST), resolved
+  to a room. A stale/typo'd/deleted branch silently falls back to `MAIN`
+  (creation is explicit via fork). A branch picker switches by navigating; an
+  owner-only 🌿 modal forks/deletes via `POST /branch`.
+- **Fork** copies the current branch (`db/fork-branch!` + lineage) and sets a
+  `$goto` signal; a `data-effect` element navigates to the new branch (full
+  reload). **Delete** (`db/delete-branch!`) drops a non-main branch, then
+  **discards the in-memory room without saving** so `unload-sheet!` can't
+  re-persist (resurrect) the deleted cells, and `$goto`s back to main.
+- Owner-only is enforced by `with-owner` (same gate as sharing/properties);
+  editors can switch to and edit any existing branch (access is per-sheet).
 
 ### Presence & edit locking
 
@@ -371,6 +397,8 @@ To cut a release: `git tag v1.2.3 && git push origin v1.2.3`.
 ## Known limitations
 
 See `TECHDEBT.md`. Highlights: `WIN-COLS/ROWS` fixed
-(not viewport-computed); last-write-wins (no merge); session-less sheets loaded
-by a bare `GET /` aren't swept; `/debug` is ungated; concurrent simultaneous
-edits can race a transient `#ERR`.
+(not viewport-computed); last-write-wins within a branch (cross-branch **merge**
+is PR B); deleting a branch other collaborators are actively on strands them
+(they get denied + must reload to main); session-less sheets loaded by a bare
+`GET /` aren't swept; `/debug` is ungated; concurrent simultaneous edits can race
+a transient `#ERR`.

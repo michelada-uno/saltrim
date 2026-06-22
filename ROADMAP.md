@@ -86,9 +86,20 @@ visual of the copied range.
   diff-saves (no history churn). `:cellprop/author` captured for undo. The branch
   dimension (`"main"`) + `db/fork-branch!` + per-prop `as-of` are the substrate
   for the rest. See `spikes/04-db-cell-storage.clj`.
-- **Git-like sheet branching** — the lifecycle on top of that substrate: a branch
-  picker, fork/switch, **merge** (app-level 3-way; define the conflict policy),
-  and as-of viewing. Still the biggest remaining piece.
+- **Git-like sheet branching** — the lifecycle on top of that substrate.
+  - **Switch + fork** ✅ SHIPPED *(branch `feat/branching`, PR A)* — a branch is
+    its own collaborative working copy: the web runtime now keys every loaded
+    engine + collaboration broadcast on a `(sheet, branch)` **room** (not the
+    bare id), so users on different branches don't see each other's cells. A
+    branch picker switches (`&b=`); an owner-only 🌿 modal forks the current
+    branch (`db/fork-branch!`, recording `:branch/parent` + `:branch/base-tx`
+    lineage for merge) or deletes a non-main branch (`db/delete-branch!`, with no
+    resurrection on unload). A stale/typo'd `&b=` falls back to main.
+  - **Merge** (PR B, next) — app-level 3-way against the recorded fork point
+    (parent doc `as-of` base-tx): auto-merge non-conflicting props, surface real
+    conflicts for the owner to resolve per property.
+  - **As-of viewing** (PR C, optional) — read-only time-travel via per-prop
+    history.
 - **Per-user undo/redo** ✅ SHIPPED *(branch `feat/undo-redo`)* — local
   *selective* undo: `Ctrl/⌘+Z` / `+Shift` (or `Ctrl+Y`) redo. The selective step
   is `sheet/undo-step` (skips a prop a collaborator overwrote, so it never

@@ -72,7 +72,13 @@
    {:db/ident :branch/drh    :db/valueType :db.type/long   :db/cardinality :db.cardinality/one}
    {:db/ident :branch/cols   :db/valueType :db.type/string :db/cardinality :db.cardinality/one} ; edn {ci width}
    {:db/ident :branch/rows   :db/valueType :db.type/string :db/cardinality :db.cardinality/one} ; edn {ri height}
-   {:db/ident :branch/defs   :db/valueType :db.type/string :db/cardinality :db.cardinality/one}]) ; edn [chunk …]
+   {:db/ident :branch/defs   :db/valueType :db.type/string :db/cardinality :db.cardinality/one} ; edn [chunk …]
+   ;; fork lineage — the branch this was forked FROM and the db's :max-tx at the
+   ;; fork instant. Together they pin the fork POINT: the 3-way merge base is the
+   ;; parent branch's document `as-of` base-tx (the common ancestor). main has
+   ;; neither (it is the root). See spikes/05-branching.clj.
+   {:db/ident :branch/parent  :db/valueType :db.type/string :db/cardinality :db.cardinality/one}
+   {:db/ident :branch/base-tx :db/valueType :db.type/long   :db/cardinality :db.cardinality/one}])
 
 ;; --- connection -----------------------------------------------------------
 
@@ -510,12 +516,58 @@
             @conn owner-uid)
        sort vec))
 
+(defn branch-names
+  "Sorted distinct branch names for `sheet-id` — the union of branches that have
+   any cellprop and branches that have a `:branch` entity, always including
+   `MAIN` (a registered sheet always has a conceptual main). Drives the picker."
+  [sheet-id]
+  (->> (concat (d/q '[:find [?b ...] :in $ ?sid
+                      :where [?sh :sheet/id ?sid] [?c :cellprop/sheet ?sh] [?c :cellprop/branch ?b]]
+                    @conn sheet-id)
+               (d/q '[:find [?n ...] :in $ ?sid
+                      :where [?sh :sheet/id ?sid] [?b :branch/sheet ?sh] [?b :branch/name ?n]]
+                    @conn sheet-id)
+               [MAIN])
+       distinct sort vec))
+
+(defn branch-exists?
+  "True if `branch` is real for `sheet-id`: `MAIN` always (the root), else iff it
+   has a `:branch` entity or any cellprop. Lets the web layer reject a typo'd
+   `&b=` instead of silently materialising an empty branch (creation is explicit
+   via `fork-branch!`)."
+  [sheet-id branch]
+  (or (= branch MAIN)
+      (boolean (or (d/q '[:find ?b . :in $ ?k :where [?b :branch/key ?k]] @conn (br-key sheet-id branch))
+                   (d/q '[:find ?c . :in $ ?sid ?br
+                          :where [?sh :sheet/id ?sid] [?c :cellprop/sheet ?sh] [?c :cellprop/branch ?br]]
+                        @conn sheet-id branch)))))
+
+(defn delete-branch!
+  "Retract every cellprop of (sheet-id, branch) plus its `:branch` entity. Refuses
+   `MAIN` (no-op, returns nil). Other branches are untouched — only datoms under
+   this exact branch are removed (history retains the retracted datoms under
+   :keep-history?). Returns the count of cellprops removed."
+  [sheet-id branch]
+  (when (not= branch MAIN)
+    (let [eids (d/q '[:find [?c ...] :in $ ?sid ?br
+                      :where [?sh :sheet/id ?sid] [?c :cellprop/sheet ?sh] [?c :cellprop/branch ?br]]
+                    @conn sheet-id branch)
+          beid (d/q '[:find ?b . :in $ ?k :where [?b :branch/key ?k]] @conn (br-key sheet-id branch))
+          tx   (cond-> (mapv (fn [e] [:db/retractEntity e]) eids)
+                 beid (conj [:db/retractEntity beid]))]
+      (when (seq tx) (d/transact conn tx))
+      (count eids))))
+
 (defn fork-branch!
   "Copy every cellprop + the branch scalars of (sheet-id, from) under branch
-   `to`. The seed of git-like branching: `to` starts identical, then diverges.
-   Returns the number of cellprops copied. (No undo/merge yet — storage only.)"
+   `to`, recording the fork lineage (`:branch/parent` = from, `:branch/base-tx` =
+   the db's `:max-tx` captured at this instant) so a later 3-way merge can
+   reconstruct the common-ancestor document via `as-of` base-tx. `to` starts
+   identical, then diverges. Caller validates name/uniqueness. Returns the number
+   of cellprops copied. (Merge itself is a later step — storage + lineage only.)"
   [sheet-id from to]
-  (let [rows (d/q '[:find ?addr ?prop ?src ?author
+  (let [base-tx (:max-tx @conn)                         ; the fork point (see spikes/05)
+        rows (d/q '[:find ?addr ?prop ?src ?author
                     :in $ ?sid ?br
                     :where [?sh :sheet/id ?sid] [?c :cellprop/sheet ?sh]
                            [?c :cellprop/branch ?br] [?c :cellprop/addr ?addr]
@@ -528,6 +580,10 @@
                          :cellprop/branch to :cellprop/addr addr
                          :cellprop/prop prop :cellprop/src src}
                   (not= "" author) (assoc :cellprop/author author)))]
-    (d/transact conn (vec cells))
+    ;; cells + the `to` branch entity (with lineage) in one tx, so a fork is
+    ;; atomic and the lineage exists even when `from` had no branch scalars.
+    (d/transact conn (conj (vec cells)
+                           {:branch/key (br-key sheet-id to) :branch/sheet [:sheet/id sheet-id]
+                            :branch/name to :branch/parent from :branch/base-tx base-tx}))
     (when-let [m (branch-meta sheet-id from)] (set-branch-meta! sheet-id to m))
     (count cells)))

@@ -232,3 +232,27 @@ REMAINING:
   rule is relaxed to "CDN + kept-in-sync fallback" per the current preference.
 - **`app.legacy.js`** is the pre-CLJS hand-written engine, kept for reference.
   Delete once the CLJS port has been in use long enough to trust.
+
+## Git-like branching (feat/branching — PR A: switch + fork)
+
+- **Merge is not built yet (PR B).** PR A ships the model + switch + fork +
+  delete. The fork lineage (`:branch/parent` + `:branch/base-tx`) is recorded so
+  PR B's 3-way merge can reconstruct the common ancestor (parent doc `as-of`
+  base-tx — proven in `spikes/05-branching.clj`). Within a branch it's still
+  last-write-wins.
+- **Merge base assumes one-level lineage.** `base-tx` pins the immediate fork
+  point; a deep chain (fork of a fork, merged back across several hops) has no
+  true LCA computation yet. Fine for the common fork→edit→merge-back flow;
+  revisit if branch trees get deep.
+- **Deleting a branch strands collaborators on it.** `delete-branch!` + the
+  in-memory room discard prevent resurrection, but other sessions currently on
+  the deleted branch aren't redirected — their next request is denied and they
+  must reload to main. A broadcast-redirect (push `$goto` to the room before
+  dropping it) would be friendlier.
+- **Branch list isn't pushed live.** A fork/delete by the owner only shows up in
+  collaborators' branch pickers on reload (the picker is server-rendered once per
+  page). Acceptable since branches are owner-managed; could patch `#branchbar`
+  to peers if needed.
+- **Per-branch presence only.** Peers on a *different* branch are invisible to
+  each other (by design — different working copies). There's no "who's on which
+  branch" overview.

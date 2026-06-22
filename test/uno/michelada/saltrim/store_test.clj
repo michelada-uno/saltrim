@@ -135,3 +135,29 @@
   (register! "dev-ann__b" "b")
   (is (= ["a" "b"] (store/list-names "dev-ann")))
   (is (empty? (store/list-names "dev-nobody"))))
+
+(deftest branch-aware-save-load
+  (register!)
+  ;; seed main
+  (let [s (sheet/create-sheet)]
+    (sheet/set-cell! s "A1" "1")
+    (store/save! id s {:author "dev-ann"}))            ; defaults to MAIN
+  (testing "load a non-existent branch is nil (creation is explicit via fork)"
+    (is (nil? (store/load-record id "exp"))))
+  ;; fork main -> exp at the db layer, then edit exp through the store
+  (db/fork-branch! id "main" "exp")
+  (let [s (store/load-sheet id "exp")]
+    (sheet/settle! s)
+    (is (= 1 (sheet/value s "A1")) "exp starts as a copy of main")
+    (sheet/set-cell! s "A1" "999")
+    (sheet/set-cell! s "B1" "exp-only")
+    (sheet/settle! s)
+    (store/save! id s {:author "dev-ann" :branch "exp"}))
+  (testing "branches are isolated: the exp edit does not leak to main"
+    (let [m (store/load-sheet id)                       ; main
+          e (store/load-sheet id "exp")]
+      (sheet/settle! m) (sheet/settle! e)
+      (is (= 1 (sheet/value m "A1")) "main unchanged")
+      (is (nil? (sheet/value m "B1")) "exp-only cell absent from main")
+      (is (= 999 (sheet/value e "A1")) "exp diverged")
+      (is (= "exp-only" (sheet/value e "B1"))))))
