@@ -478,9 +478,10 @@
             [:div {:style h3} "Cells & formulas"]
             [:p {:style p} "Type a value, or start with " [:span {:style kbd} "="]
              " for a formula (Clojure s-expressions). Reference cells with "
-             [:span {:style kbd} "#cell A1"] " and ranges with " [:span {:style kbd} "#cells A1:A3"] "."]
-            [:p {:style p} "e.g. " [:span {:style kbd} "=(+ #cell A1 #cell B1)"] " · "
-             [:span {:style kbd} "=(reduce + #cells A1:A3)"]]
+             [:span {:style kbd} "#cell A1"] " and ranges with " [:span {:style kbd} "#cells A1:A3"]
+             " — or the short form " [:span {:style kbd} "$A1"] " / " [:span {:style kbd} "$A3:D8"] "."]
+            [:p {:style p} "e.g. " [:span {:style kbd} "=(+ $A1 $B1)"] " · "
+             [:span {:style kbd} "=(reduce + $A1:A3)"]]
             [:p {:style p} "Built-in functions: math (" [:span {:style kbd} "sum"] ", "
              [:span {:style kbd} "round"] ", " [:span {:style kbd} "sqrt"] "…), stats ("
              [:span {:style kbd} "mean"] ", " [:span {:style kbd} "median"] ", "

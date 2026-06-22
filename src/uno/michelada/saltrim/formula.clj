@@ -7,6 +7,10 @@
      #cells A1:B2    -> [A1 B1 A2 B2]  ROW-MAJOR rectangle       (block)
    Any inclusive rectangle works (for map/reduce); ranges expand at read time.
 
+   Terse sugar: a bare `$A1` reads like `#cell A1`, and `$A3:D8` like
+   `#cells A3:D8` — `$` is just a compact cell-ref sigil (relative; shifts on
+   paste like the reader tags), not an absolute marker. See `dollar-ref`.
+
    Why SCI: the old path host-`eval`d the body under a symbol whitelist, which
    could not allow `let`/`fn` (the user's own binder names aren't in the list).
    SCI gives real lexical scope, fn literals, destructuring, etc., in a sandbox
@@ -61,8 +65,30 @@
     (walk/postwalk (fn [x] (when (ref? x) (vswap! acc conj (second x))) x) form)
     @acc))
 
+;; A bare `$`-prefixed A1 address is terse sugar for a reader tag:
+;;   $A1     <=> #cell  A1
+;;   $A3:D8  <=> #cells A3:D8
+;; These read as ordinary symbols (`$A1`, `$A3:D8`) so we rewrite them on the
+;; PARSED form (not the string) — that way a `$A1` inside a string literal is
+;; untouched. `$` is a terse cell ref here (relative, shifts on paste like the
+;; reader tags), NOT an Excel-style absolute marker.
+(def ^:private dollar-ref-re #"\$([A-Za-z]+[0-9]+)(?::([A-Za-z]+[0-9]+))?")
+
+(defn- dollar-ref
+  "Marker form for a `$`-cell symbol (`$A1` -> a ref; `$A3:D8` -> a vector of
+   refs like #cells), or nil if `x` isn't one."
+  [x]
+  (when (symbol? x)
+    (when-let [[_ a b] (re-matches dollar-ref-re (name x))]
+      (if b
+        (cons 'vector (map ref-marker (addr/range-cells a b)))
+        (ref-marker a)))))
+
 (defn parse
   "Formula string (without leading =) -> {:form :deps}.
+
+   Bare `$A1` / `$A3:D8` symbols are terse sugar for `#cell A1` / `#cells A3:D8`
+   (see `dollar-ref`) — usable in any formula.
 
    With `self` (the owner address, e.g. for a STYLE/FORMAT property), the bare
    symbol `$val` rewrites to a ref on the owner's own value — sugar for
@@ -73,9 +99,12 @@
   ([s] (parse s nil))
   ([s self]
    (let [form0 (edn/read-string {:readers readers} s)
-         form  (if self
-                 (walk/postwalk #(if (= '$val %) (ref-marker self) %) form0)
-                 form0)]
+         form  (walk/postwalk
+                (fn [x]
+                  (cond
+                    (and self (= '$val x)) (ref-marker self)
+                    :else                  (or (dollar-ref x) x)))
+                form0)]
      {:form form :deps (deps form)})))
 
 ;; --- reference shifting (clipboard paste) -------------------------------
@@ -87,8 +116,9 @@
 (defn shift-refs
   "Shift every cell reference in formula `src` by (dc, dr) cols/rows, clamped at
    A1 — so clipboard paste is RELATIVE: copy =(+ #cell A1 1) from B1 to B2 pastes
-   =(+ #cell A2 1). Non-formula text (no #cell/#cells markers) is returned as-is;
-   a zero shift is a no-op."
+   =(+ #cell A2 1). Handles both the reader tags (#cell/#cells) and the terse
+   `$A1`/`$A3:D8` sugar. Non-formula text is returned as-is; a zero shift is a
+   no-op."
   [src dc dr]
   (if (or (nil? src) (and (zero? dc) (zero? dr)))
     src
@@ -96,7 +126,13 @@
         (str/replace #"#cells\s+([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
                      (fn [[_ a b]] (str "#cells " (shift-addr a dc dr) ":" (shift-addr b dc dr))))
         (str/replace #"#cell\s+([A-Za-z]+[0-9]+)"
-                     (fn [[_ a]] (str "#cell " (shift-addr a dc dr)))))))
+                     (fn [[_ a]] (str "#cell " (shift-addr a dc dr))))
+        ;; $-sugar: range first, then a lone $A1 (the (?!:) keeps the single
+        ;; pass from re-shifting the already-shifted left half of a $A3:D8 range)
+        (str/replace #"\$([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
+                     (fn [[_ a b]] (str "$" (shift-addr a dc dr) ":" (shift-addr b dc dr))))
+        (str/replace #"\$([A-Za-z]+[0-9]+)(?!:)"
+                     (fn [[_ a]] (str "$" (shift-addr a dc dr)))))))
 
 ;; --- SCI sandbox + stdlib ----------------------------------------------
 ;; SCI runs the user expression in a curated, side-effect-free subset of

@@ -23,12 +23,18 @@ reader tags:
 | `#cells A1:C1` | a row range `[A1 B1 C1]` |
 | `#cells A1:B2` | a rectangle, row-major `[A1 B1 A2 B2]` |
 
+Or use the shorter `$` form — `$A1` is the same as `#cell A1`, and `$A3:D8` the
+same as `#cells A3:D8` (it's just shorthand; it shifts on paste like any other
+reference).
+
 Examples:
 
 ```clojure
 =(+ #cell A1 #cell B1)        ; sum two cells
+=(+ $A1 $B1)                  ; the same, shorter
 =(reduce + #cells A1:A3)      ; sum a range
-=(if (> #cell A1 0) "ok" "no")
+=(sum $A1:A3)                 ; the same, shorter
+=(if (> $A1 0) "ok" "no")
 ```
 
 Formulas that depend on other cells recompute automatically when those cells

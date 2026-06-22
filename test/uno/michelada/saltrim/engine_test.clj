@@ -382,4 +382,28 @@
   (testing "#cells range shifts both corners"
     (is (= "=(reduce + #cells B1:C2)" (formula/shift-refs "=(reduce + #cells A1:B2)" 1 0))))
   (testing "refs clamp at A1 (no negative indices)"
-    (is (= "=(+ #cell A1 1)" (formula/shift-refs "=(+ #cell A1 1)" -5 -5)))))
+    (is (= "=(+ #cell A1 1)" (formula/shift-refs "=(+ #cell A1 1)" -5 -5))))
+  (testing "$-sugar shifts like the reader tags"
+    (is (= "=(* $B2 2)" (formula/shift-refs "=(* $A1 2)" 1 1)))
+    (is (= "=(sum $A5:D10)" (formula/shift-refs "=(sum $A3:D8)" 0 2)) "range, no double-shift of left half")
+    (is (= "=(+ $B1 #cell C2)" (formula/shift-refs "=(+ $A1 #cell B2)" 1 0)) "mixed $ and reader tag")))
+
+(deftest dollar-refs
+  (testing "parse: $A1 / $A3:D8 are sugar for #cell / #cells"
+    (is (= #{"A1"} (:deps (formula/parse "(* $A1 2)"))))
+    (is (= (:deps (formula/parse "(sum #cells A3:D8)"))
+           (:deps (formula/parse "(sum $A3:D8)"))) "range deps match the reader tag")
+    (is (= #{"A1" "B2" "C1" "C2" "C3"}
+           (:deps (formula/parse "(+ $A1 #cell B2 (sum #cells C1:C3))"))) "mixes with reader tags"))
+  (testing "a $-like token inside a string literal is NOT a ref"
+    (is (empty? (:deps (formula/parse "(str \"owe $A1 now\")")))))
+  (let [s (mk)]
+    (put s "A1" "10") (put s "A2" "20") (put s "A3" "30")
+    (put s "B1" "=(* $A1 2)")                 ; single $-ref
+    (put s "B2" "=(sum $A1:A3)")              ; range $-ref
+    (is (= 20 (v s "B1")))
+    (is (= 60 (v s "B2")))
+    (testing "reacts to a dep change like any ref"
+      (put s "A1" "100")
+      (is (= 200 (v s "B1")))
+      (is (= 150 (v s "B2"))))))

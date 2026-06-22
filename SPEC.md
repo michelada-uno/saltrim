@@ -81,6 +81,11 @@ Reader tags:
   inclusive **rectangle**, expanded **row-major** at read time: `A1:A3`→`[A1 A2
   A3]` (column), `A1:C1`→`[A1 B1 C1]` (row), `A1:B2`→`[A1 B1 A2 B2]` (block).
 
+Terse `$`-sugar (equivalent, not absolute refs): `$A1` ≡ `#cell A1`, `$A3:D8` ≡
+`#cells A3:D8`. These read as ordinary symbols, so `parse` rewrites them on the
+PARSED form (a `$A1` inside a string literal is left alone). They shift on paste
+like the reader tags (`shift-refs`).
+
 Pipeline (`formula`):
 1. `parse`: `clojure.edn/read-string` with custom readers (EDN blocks `#=` RCE).
    `#cell`/`#cells` emit neutral ref-markers `(::ref "A1")`. `:deps` = the marked
