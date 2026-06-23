@@ -34,7 +34,13 @@ on load. Multiple clients edit one sheet live.
 | `graph` | Pure layered-DAG layout for the dependency-graph view: a forward deps-map → nodes + `[from to]` edges + longest-path `layer`. No db/engine. |
 | `sheet` | Cell registry over one Spindel execution context. The engine API. |
 | `store` | Persistence seam over `db`: the source document (cells + per-branch scalars) as datoms, branch `"main"`. Keeps `save!`/`load-record`/`exists?`/`list-names`. |
-| `web` | http-kit server, rendering, SSE handlers, sessions, collaboration. |
+| `web` | Entry point: the http-kit `app` router + mount states (`server`/`sweeper`) + `-main`. The bulk is split into `web.*` below (layered, no cyclic deps). |
+| `web.geom` | Pure grid geometry + small stateless helpers (`view-base`/`window`/`axis-*`/`in-window?`/`pretty-err`/`url-*`). |
+| `web.state` | The `sheets*`/`sessions*` registries (keyed by the `(sheet,branch)` room) + pure accessors (`sheet-rec`/`accessible-rec`/`save-rec!`/…). No rendering, no broadcasts. |
+| `web.sse` | SSE plumbing over the Datastar SDK (`sse`/`patch-inner!`/`signals!`) + the WebKit flush tick. |
+| `web.render` | All server-rendered HTML/SVG: grid window, page shell, every modal, share/branch/graph/history fragments, auth pages. Reads state for presence; never pushes. |
+| `web.collab` | Live collaboration: session lifecycle (register/ensure/reap/sweep) + per-room broadcasts + `/stream`. (reap↔broadcast are mutually recursive → same ns.) |
+| `web.handlers` | Request handlers + access gates (`with-*`); mutate under the edit lock, persist, push. Plus auth routes + root page. |
 | `spike*` | REPL spikes proving Spindel behavior (kept as living docs). |
 
 ## Reactive cell model (the core idea)
