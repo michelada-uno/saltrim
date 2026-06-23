@@ -299,3 +299,28 @@ REMAINING:
 - **History views don't collaborate.** No stream/presence on an as-of view (by
   design — it's a frozen snapshot); two people viewing the same revision don't
   see each other.
+
+## Insert row/column + multi-cell style (feat/insert-line)
+
+- **Inserting inside a range surfaces #ERR until the blank is filled.** A
+  `#cells A1:A5` straddling the insert correctly grows to `A1:A6`, but SaltRim's
+  engine treats a reference to a BLANK cell as an error (existing semantics — see
+  the engine-test "reference to a blank cell"), so the formula shows `#ERR` until
+  the inserted cell gets a value. Consistent with the model, but a spreadsheet
+  user expects blanks to count as 0 in an aggregate. Tolerating blank refs (nil
+  → 0/skip) is a broader engine change, tracked separately.
+- **`delete-line!` assumes the removed line is unreferenced.** It is built as the
+  inverse of `insert-line!` (so an insert undoes in one step) and that holds for a
+  freshly-blank inserted line. A user-facing **delete row/column** would need
+  `#REF`-style handling for formulas pointing AT the deleted line — so the engine
+  op exists but no delete UI is exposed yet (trivial to add once #REF is decided).
+- **Insert is a full rebuild + full-window re-render.** `insert-line!` rebuilds
+  the whole cell graph from the shifted document and the handler re-renders the
+  entire window for every session. Cheap for modest sheets; could be incremental
+  if it matters.
+- **Cells shifted past `MAX-COLS`/`MAX-ROWS` are dropped** (the "where possible"
+  edge). Irrelevant in practice (used ranges sit far from the grid bound).
+- **Multi-cell style records one undo entry per cell** (not a single grouped
+  step), so undoing a rectangle-style takes N Ctrl+Z. Insert, by contrast, is one
+  structural step. Grouping consecutive per-cell edits into one undo is a possible
+  refinement.

@@ -91,7 +91,9 @@ Reader tags:
 Terse `$`-sugar (equivalent, not absolute refs): `$A1` ≡ `#cell A1`, `$A3:D8` ≡
 `#cells A3:D8`. These read as ordinary symbols, so `parse` rewrites them on the
 PARSED form (a `$A1` inside a string literal is left alone). They shift on paste
-like the reader tags (`shift-refs`).
+like the reader tags (`shift-refs`), and follow a row/column insert/delete
+(`insert-shift` — a conditional shift that only moves refs at/after the inserted
+line, so a range straddling it grows).
 
 Pipeline (`formula`):
 1. `parse`: `clojure.edn/read-string` with custom readers (EDN blocks `#=` RCE).
@@ -306,6 +308,14 @@ that the client `translate`s.
   **broadcasts** the change to other sessions on the sheet.
 - `POST /view` — window change (signals carry `r0/c0/sheet/sid`). Patches
   `#cells/#colhead/#rowhead` inner + `#meta`.
+- `POST /style` — set a style/format/`:label` prop. Applies to the **whole
+  selection** when `$selcells` spans >1 cell (app.cljs keeps `$selcells` live),
+  else the single `$cell`.
+- `POST /insert` — insert a blank row/column at the active cell
+  (`$insertdir` top|bottom|left|right). `sheet/insert-line!` shifts cells and
+  rewrites formula refs (`formula/insert-shift`); one **structural** undo entry
+  (`sheet/undo-step` reverses it via `delete-line!` in a single Ctrl+Z); full
+  window re-render + broadcast.
 - `POST /session/end` — `navigator.sendBeacon` on `pagehide` → `reap-session!`.
 - `GET /debug` — session/sheet detail; only served while the dev auth provider
   is active (404 otherwise).
