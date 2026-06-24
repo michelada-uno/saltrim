@@ -21,6 +21,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full history — the version's patch number is
+                                  # the commit count (a shallow clone reports 1)
 
       - name: Set up JDK
         uses: actions/setup-java@v4

@@ -9,7 +9,8 @@
    the git commit count as the patch. The release workflow reads it via
    `clojure -T:build version` (see .github/workflows/release.yml). Run the jar:
      java -jar target/saltrim-<version>.jar"
-  (:require [clojure.tools.build.api :as b]))
+  (:require [clojure.java.io :as io]
+            [clojure.tools.build.api :as b]))
 
 (def lib 'uno.michelada/saltrim)
 (def main 'uno.michelada.saltrim.web)
@@ -61,6 +62,10 @@
     (clean nil)
     (cljs nil)
     (b/copy-dir {:src-dirs ["src" "resources"] :target-dir class-dir})
+    ;; Stamp the resolved version into a packaged resource so the running app can
+    ;; show it (see uno.michelada.saltrim.version). Only the jar carries this —
+    ;; run from source it's absent and the app reports "dev".
+    (spit (io/file class-dir "saltrim-version.txt") version)
     (b/compile-clj {:basis basis :class-dir class-dir :ns-compile [main]})
     (b/uber {:class-dir class-dir
              :uber-file uber-file

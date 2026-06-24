@@ -14,6 +14,7 @@
             [uno.michelada.saltrim.merge :as mrg]
             [uno.michelada.saltrim.sheet :as sheet]
             [uno.michelada.saltrim.store :as store]
+            [uno.michelada.saltrim.version :as version]
             [uno.michelada.saltrim.constants :refer [CW RH GUT HDR OVER BAR]]
             [uno.michelada.saltrim.web.geom :refer [axis-x axis-y col-w in-window? rgba row-h total-px url-decode view-base window]]
             [uno.michelada.saltrim.web.state :refer [def-editor-of owner-of session-view sessions* sheets*]]))
@@ -323,7 +324,11 @@
 
             [:div {:style h3} "Sharing"]
             [:p {:style p} "The link / lock button (top bar, owner only) shares the sheet by capability "
-             "link or with specific people, at view or edit level."]]]))))
+             "link or with specific people, at view or edit level."]
+
+            [:div {:style (str "margin-top:1rem;padding-top:.6rem;border-top:1px solid var(--line);"
+                               "font:11px sans-serif;color:#9aa1a9;text-align:center;")}
+             "SaltRim " (version/current)]]]))))
 
 (declare deflib-html bigedit-html)
 
@@ -1255,7 +1260,9 @@
                    :style "display:flex;gap:.4rem;"}
             [:input {:name "name" :placeholder "your name (dev login)"
                      :autofocus true :style (str field "flex:1;")}]
-            [:button {:style field} "Sign in"]])]]]]))))
+            [:button {:style field} "Sign in"]])]
+        [:p {:style "text-align:center;margin-top:1.4rem;font:11px sans-serif;color:#aab0b8;"}
+         "SaltRim " (version/current)]]]]))))
 
 (defn denied-page [uid]
   (str
