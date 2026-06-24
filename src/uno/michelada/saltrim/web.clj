@@ -16,7 +16,7 @@
             [uno.michelada.saltrim.web.state :refer [SWEEP-MS sessions* sheets*]]
             [uno.michelada.saltrim.web.render :refer [page]]
             [uno.michelada.saltrim.web.collab :refer [sweep!]]
-            [uno.michelada.saltrim.web.handlers :refer [auth-routes handle-branch handle-cell handle-clear handle-copy handle-cut handle-defadd handle-defdel handle-deflock handle-defsave handle-defunlock handle-graph handle-merge handle-paste handle-presence handle-props handle-redo handle-root handle-session-end handle-share handle-size handle-stream handle-style handle-undo handle-view handle-viewat]])
+            [uno.michelada.saltrim.web.handlers :refer [auth-routes handle-branch handle-cell handle-clear handle-copy handle-cut handle-defadd handle-defdel handle-deflock handle-defsave handle-defunlock handle-graph handle-insert handle-merge handle-paste handle-presence handle-props handle-redo handle-root handle-session-end handle-share handle-size handle-stream handle-style handle-undo handle-view handle-viewat]])
   (:gen-class))
 
 (defn- app [req]
@@ -71,6 +71,7 @@
     [:post "/cut"]        (handle-cut req)
     [:post "/paste"]      (handle-paste req)
     [:post "/size"]       (handle-size req)
+    [:post "/insert"]     (handle-insert req)
     [:post "/props"]      (handle-props req)
     [:post "/deflock"]    (handle-deflock req)
     [:post "/defunlock"]  (handle-defunlock req)

@@ -150,6 +150,16 @@
                        (update :undo #(vec (take-last UNDO-CAP (conj (or % []) {:addr addr :prop prop :before before :after after}))))
                        (assoc :redo []))))))
 
+(defn- record-structural!
+  "Push a structural undo entry (a whole row/col insert/delete) — undone/redone as
+   ONE step by sheet/undo-step. Clears redo, like record-edit!."
+  [sid op axis at]
+  (when (@sessions* sid)
+    (swap! sessions* update sid
+           (fn [s] (-> s
+                       (update :undo #(vec (take-last UNDO-CAP (conj (or % []) {:op op :axis axis :at at}))))
+                       (assoc :redo []))))))
+
 (defn- handle-undo* [req dir]
   (with-access req
     (fn [uid sheet-id rec {:keys [sid]} gen]
@@ -165,9 +175,13 @@
                   (swap! sessions* update sid assoc :undo (:undo stacks) :redo (:redo stacks))
                   (when affected (sheet/settle! sh) (save-rec! (:room rec) uid))
                   affected))]
-          (if affected
-            (push-changes! gen sid (:room rec) sh affected)
-            (signals! gen {:err ""})))))))           ; nothing (un)doable — silent
+          (cond
+            (= affected :all)            ; a structural (insert/delete) step — re-render all
+            (do (render-window! gen sid (:room rec) sh (session-view sid))
+                (broadcast-window! sid (:room rec) sh)
+                (signals! gen {:err ""}))
+            affected (push-changes! gen sid (:room rec) sh affected)
+            :else    (signals! gen {:err ""})))))))  ; nothing (un)doable — silent
 
 (defn handle-undo [req] (handle-undo* req :undo))
 (defn handle-redo [req] (handle-undo* req :redo))
@@ -195,33 +209,41 @@
                 (catch Throwable e
                   (signals! gen {:err (str cell ": " (pretty-err (.getMessage e)))}))))))))))
 
-(defn handle-style [req]
+(declare selected-cells)
+
+(defn handle-style
+  "Set a style/format/label prop. Applies to the WHOLE selection when $selcells
+   spans more than one cell (so you can style a rectangle in one go); otherwise to
+   the single active $cell. Per-cell undo; one settle/save; re-render the touched
+   cells + broadcast."
+  [req]
   (with-access req
-    (fn [uid sheet-id rec {:keys [cell sid] :as sig} gen]
+    (fn [uid sheet-id rec {:keys [cell sid selcells] :as sig} gen]
       (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
-      (let [sh   (:sh rec)
-            prop (keyword (:styleprop sig))
-            src  (str (:stylesrc sig))]
+      (let [sh    (:sh rec)
+            prop  (keyword (:styleprop sig))
+            src   (str (:stylesrc sig))
+            sel   (selected-cells selcells)
+            cells (if (> (count sel) 1) sel (when (addr/valid? cell) [cell]))]
         (cond
           (not= :read-write (:level rec))
           (signals! gen {:err "read-only access — you can't edit this sheet"})
           (not (prop-allowed? prop))
           (signals! gen {:err (str "unknown style property: " (:styleprop sig))})
-          (not (addr/valid? cell))
+          (empty? cells)
           (signals! gen {:err "select a cell first"})
           :else
           (locking edit-lock
             (try
-              (let [before (get (sheet/style-srcs sh cell) prop)]
-                (sheet/set-style! sh cell prop src)
-                (sheet/settle! sh)
-                (record-edit! sid cell prop before (get (sheet/style-srcs sh cell) prop)))
+              (doseq [c cells]
+                (let [before (get (sheet/style-srcs sh c) prop)]
+                  (sheet/set-style! sh c prop src)
+                  (record-edit! sid c prop before (get (sheet/style-srcs sh c) prop))))
+              (sheet/settle! sh)
               (save-rec! (:room rec) uid)
-              ;; only the styled cell re-renders now; style refs to OTHER cells
-              ;; just register the edge for future value changes.
-              (push-changes! gen sid (:room rec) sh [cell])
+              (push-changes! gen sid (:room rec) sh cells)
               (catch Throwable e
-                (signals! gen {:err (str cell " " (name prop) " style: "
+                (signals! gen {:err (str (name prop) " style: "
                                          (pretty-err (.getMessage e)))})))))))))
 
 (defn- selected-cells
@@ -419,6 +441,43 @@
               (broadcast-window! sid (:room rec) sh)
               (catch Throwable e
                 (signals! gen {:err (pretty-err (.getMessage e))})))))))))
+
+(defn handle-insert
+  "Insert a blank row/column relative to the active cell ($sel). `$insertdir` ∈
+   top|bottom|left|right → (axis, index). `sheet/insert-line!` shifts cells +
+   follows formula references; recorded as ONE structural undo step. Re-renders
+   the whole window for everyone (positions all change)."
+  [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [sid sel insertdir]} gen]
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
+      (let [sh (:sh rec)]
+        (cond
+          (not= :read-write (:level rec))
+          (signals! gen {:err "read-only access — you can't edit this sheet"})
+          (not (addr/valid? sel))
+          (signals! gen {:err "select a cell first"})
+          :else
+          (let [{:keys [ci ri]} (addr/parse sel)
+                [axis at] (case (str insertdir)
+                            "top"    [:row ri]
+                            "bottom" [:row (inc ri)]
+                            "left"   [:col ci]
+                            "right"  [:col (inc ci)]
+                            [nil nil])]
+            (if-not axis
+              (signals! gen {:err ""})
+              (locking edit-lock
+                (try
+                  (sheet/insert-line! sh axis at)
+                  (sheet/settle! sh)
+                  (record-structural! sid :insert axis at)
+                  (save-rec! (:room rec) uid)
+                  (render-window! gen sid (:room rec) sh (session-view sid))
+                  (broadcast-window! sid (:room rec) sh)
+                  (signals! gen {:err ""})
+                  (catch Throwable e
+                    (signals! gen {:err (pretty-err (.getMessage e))})))))))))))
 
 (defn handle-props
   "Owner-only sheet properties: set the default column width / row height from

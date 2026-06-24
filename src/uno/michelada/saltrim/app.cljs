@@ -43,7 +43,7 @@
 (defonce ^:private last-r0 (atom 0))
 (defonce ^:private view-timer (atom nil))
 (defonce ^:private SEL (atom {:ranges []}))  ; multi-selection (see below)
-(declare render-sel!)                         ; defined with the selection section
+(declare render-sel! sel-ranges-str)          ; defined with the selection section
 
 (defn- mta
   "The rendered window's live geometry from #meta: totals (tw/th), base index
@@ -242,6 +242,7 @@
 (defn- sel-set! [ranges]
   (reset! SEL {:ranges ranges})
   (when-let [[c r] (sel-active)] (select! (addr/make c r)))   ; active -> $sel/bars/presence
+  (emit! "sr-sel" #js {:ranges (sel-ranges-str)})            ; keep $selcells live (style/clear/…)
   (render-sel!))
 
 (defn- sel-single! [c r] (sel-set! [{:a [c r] :f [c r]}]))

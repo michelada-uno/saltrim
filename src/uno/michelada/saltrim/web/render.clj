@@ -266,6 +266,12 @@
              [:span {:style kbd} "fg"] " (text color), " [:span {:style kbd} "weight"] " (e.g. bold), "
              [:span {:style kbd} "slant"] " (e.g. italic), " [:span {:style kbd} "align"] " (left/right/center)."]
             [:p {:style p} "e.g. bg " [:span {:style kbd} "=(if (> $val 100) \"tomato\" \"white\")"]]
+            [:p {:style p} "Select a range first and a style applies to every cell in it."]
+
+            [:div {:style h3} "Insert rows / columns"]
+            [:p {:style p} "The " [:span {:style kbd} "insert"] " buttons (format row) add a blank row/column "
+             "next to the selected cell. Cells shift and formula references follow the shift; it's one "
+             [:span {:style kbd} "Ctrl/⌘+Z"] " to undo."]
 
             [:div {:style h3} "Dependency graph"]
             [:p {:style p} "The " [:span {:style kbd} "🕸"] " button draws how cells feed each other "
@@ -724,9 +730,10 @@
              :data-signals:stylesrc "''"
              ;; collapsible toolbar sections (formula bar stays; others toggle)
              :data-signals:fmtbar "false"
-             ;; current multi-selection as space-separated "TL:BR" ranges (set by
-             ;; app.cljs before a selection-wide action, e.g. Delete -> /clear)
+             ;; current multi-selection as space-separated "TL:BR" ranges, kept
+             ;; LIVE by app.cljs so selection-wide actions (clear / style / …) use it
              :data-signals:selcells "''"
+             :data-signals:insertdir "''"   ; top|bottom|left|right (insert blank row/col)
              :data-signals:rzcmd "''"
              ;; definitions library (ƒ modal)
              :data-signals:defspanel "false"
@@ -822,7 +829,14 @@
                 :placeholder "color / mask / =formula (use $val) — Enter to apply"
                 :data-on:keydown "evt.key==='Enter' && ($cell=$sel, @post('/style'))"
                 :style "flex:1;"}]
-       [:button {:class "btn" :title "big editor" :data-on:click "$big=$stylesrc, $bigwhat='style', $bigedit=true"} "⤢"]])
+       [:button {:class "btn" :title "big editor" :data-on:click "$big=$stylesrc, $bigwhat='style', $bigedit=true"} "⤢"]
+       ;; insert a blank row/column around the selected cell (refs follow; one undo)
+       [:span {:style "border-left:1px solid var(--grid);margin:0 .2rem;align-self:stretch;"}]
+       [:span {:style "font:11px sans-serif;color:var(--muted);"} "insert"]
+       [:button {:class "btn" :title "insert row above" :data-on:click "$insertdir='top', @post('/insert')"} "⤒ row"]
+       [:button {:class "btn" :title "insert row below" :data-on:click "$insertdir='bottom', @post('/insert')"} "⤓ row"]
+       [:button {:class "btn" :title "insert column left" :data-on:click "$insertdir='left', @post('/insert')"} "⇤ col"]
+       [:button {:class "btn" :title "insert column right" :data-on:click "$insertdir='right', @post('/insert')"} "⇥ col"]])
       ;; logical-scroll viewport (custom wheel + scrollbars in /app.js)
       (grid-layers sh {:r0 0 :c0 0})
 
@@ -851,6 +865,10 @@
              ;; per-user undo / redo (Ctrl+Z / Ctrl+Shift+Z|Ctrl+Y from app.cljs)
              :data-on:sr-undo__window "@post('/undo')"
              :data-on:sr-redo__window "@post('/redo')"
+             ;; keep $selcells in sync with the live selection (no post) so a
+             ;; selection-wide action (style a rectangle, /clear, …) uses the
+             ;; current ranges
+             :data-on:sr-sel__window "$selcells=evt.detail.ranges"
              ;; clear the current selection (Delete/Backspace from app.cljs)
              :data-on:sr-clear__window "$selcells=evt.detail.ranges, @post('/clear')"
              ;; clipboard (Ctrl/⌘ C / X / V from app.cljs) — selection rides in $selcells

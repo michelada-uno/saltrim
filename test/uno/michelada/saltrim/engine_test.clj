@@ -407,3 +407,63 @@
       (put s "A1" "100")
       (is (= 200 (v s "B1")))
       (is (= 150 (v s "B2"))))))
+
+(deftest insert-shift-refs
+  (testing "row insert at index 2 (+1): refs >= row3 bump, ranges straddling grow"
+    (is (= "(+ (#cell A1) (#cell A6) (sum #cells A1:A6) $B4)"
+           (formula/insert-shift "(+ (#cell A1) (#cell A5) (sum #cells A1:A5) $B3)" :row 2 1))))
+  (testing "col insert at index 1 (+1)"
+    (is (= "(+ (#cell A1) (#cell D1) #cells A1:D1)"
+           (formula/insert-shift "(+ (#cell A1) (#cell C1) #cells A1:C1)" :col 1 1))))
+  (testing "delete (-1) is the inverse"
+    (let [src "(+ (#cell A1) (#cell A5) #cells A1:A5 $B3)"]
+      (is (= src (formula/insert-shift (formula/insert-shift src :row 2 1) :row 2 -1)))))
+  (testing "refs before the line are untouched"
+    (is (= "(+ $A1 $A2)" (formula/insert-shift "(+ $A1 $A2)" :row 5 1)))))
+
+(deftest insert-line
+  (let [s (mk)]
+    (put s "A1" "10") (put s "A2" "20")
+    (put s "B1" "=(* $A1 2)")          ; ref above the insert
+    (put s "B2" "=(* $A2 3)")          ; ref that will move
+    (sh/set-style! s "A2" :bg "tomato")
+    (sh/set-col-width! s 5 99)
+    (sh/settle! s)
+    (testing "insert a blank row above row 2 (index 1)"
+      (sh/insert-line! s :row 1) (sh/settle! s)
+      (is (= 10 (v s "A1")) "row above the insert stays")
+      (is (nil? (v s "A2")) "the inserted row is blank")
+      (is (= 20 (v s "A3")) "old A2 moved down")
+      (is (= 20 (v s "B1")) "ref above the insert ($A1) unchanged")
+      (is (= "=(* $A3 3)" (sh/raw s "B3")) "moved formula's ref followed to A3")
+      (is (= 60 (v s "B3")))
+      (is (= "tomato" (sh/style-value s "A3" :bg)) "style followed the cell"))
+    (testing "delete-line! is the exact inverse"
+      (sh/delete-line! s :row 1) (sh/settle! s)
+      (is (= 20 (v s "A2")))
+      (is (= "=(* $A2 3)" (sh/raw s "B2")))
+      (is (= "tomato" (sh/style-value s "A2" :bg)))
+      (is (= 99 (sh/col-width s 5)) "untouched-axis size preserved")))
+  (testing "column insert shifts cols + col sizes"
+    (let [s (mk)]
+      (put s "A1" "1") (put s "C1" "=(* $A1 5)")
+      (sh/set-col-width! s 2 50)        ; column C
+      (sh/settle! s)
+      (sh/insert-line! s :col 1) (sh/settle! s)   ; insert blank column B
+      (is (= 1 (v s "A1")) "A unchanged")
+      (is (= "=(* $A1 5)" (sh/raw s "D1")) "old C1 moved to D1, ref to A1 unchanged")
+      (is (= 50 (sh/col-width s 3)) "old col C size moved to col D"))))
+
+(deftest structural-undo
+  (let [s (mk)]
+    (put s "A1" "10") (put s "A2" "20") (sh/settle! s)
+    (sh/insert-line! s :row 1) (sh/settle! s)
+    (is (= 20 (v s "A3")) "inserted")
+    (let [{:keys [stacks affected]} (sh/undo-step s {:undo [{:op :insert :axis :row :at 1}] :redo []} :undo)]
+      (sh/settle! s)
+      (is (= :all affected) "structural step re-renders all")
+      (is (= 20 (v s "A2")) "undo reversed the insert in one step")
+      (is (nil? (v s "A3")))
+      (testing "redo re-inserts"
+        (sh/undo-step s stacks :redo) (sh/settle! s)
+        (is (= 20 (v s "A3")))))))

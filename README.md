@@ -100,6 +100,17 @@ Style formulas are reactive too: a style that reads another cell updates when
 that cell changes. A broken style formula is reported in the toast and simply
 isn't applied.
 
+**Styling a whole selection:** select a range (or several), then apply a property
+— it sets that property on every cell in the selection at once.
+
+### Insert rows & columns
+
+In the format row (**🎨**), the **insert** buttons add a blank row or column next
+to the selected cell — **⤒ row** above, **⤓ row** below, **⇤ col** left, **⇥ col**
+right. Existing cells shift out of the way and **formula references follow the
+shift** (a range that the new line falls inside grows to include it). An insert
+is a single **Undo** step (Ctrl/⌘+Z puts everything back).
+
 ### Number format
 
 The `format` property applies a display **mask** to a cell's numeric value

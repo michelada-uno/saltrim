@@ -134,6 +134,40 @@
         (str/replace #"\$([A-Za-z]+[0-9]+)(?!:)"
                      (fn [[_ a]] (str "$" (shift-addr a dc dr)))))))
 
+(defn- bump-addr
+  "Shift `a`'s coordinate on `axis` (:row|:col) by `delta` IFF that coordinate is
+   `>= at` (clamped ≥ 0); other coordinates / refs untouched. The conditional
+   shift behind inserting/deleting a line."
+  [a axis at delta]
+  (let [{:keys [ci ri]} (addr/parse a)]
+    (cond
+      (and (= axis :col) (>= ci at)) (addr/make (max 0 (+ ci (long delta))) ri)
+      (and (= axis :row) (>= ri at)) (addr/make ci (max 0 (+ ri (long delta))))
+      :else a)))
+
+(defn insert-shift
+  "Rewrite cell references in formula `src` for a structural row/col change:
+   insert a blank line (`delta` +1) or remove one (`delta` -1) at index `at` on
+   `axis` (:row|:col). A ref endpoint whose coordinate on that axis is `>= at`
+   moves by `delta`; the rest stay. Each `#cells` endpoint is rewritten
+   independently, so a range straddling the line grows/shrinks. Handles the reader
+   tags and the `$A1`/`$A3:D8` sugar; non-formula text / nil pass through.
+   (delete's handling assumes the removed line carries no references TO it — true
+   when undoing an insert of a blank line.)"
+  [src axis at delta]
+  (if (nil? src)
+    src
+    (let [b (fn [a] (bump-addr a axis at delta))]
+      (-> src
+          (str/replace #"#cells\s+([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
+                       (fn [[_ a c]] (str "#cells " (b a) ":" (b c))))
+          (str/replace #"#cell\s+([A-Za-z]+[0-9]+)"
+                       (fn [[_ a]] (str "#cell " (b a))))
+          (str/replace #"\$([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
+                       (fn [[_ a c]] (str "$" (b a) ":" (b c))))
+          (str/replace #"\$([A-Za-z]+[0-9]+)(?!:)"
+                       (fn [[_ a]] (str "$" (b a))))))))
+
 ;; --- SCI sandbox + stdlib ----------------------------------------------
 ;; SCI runs the user expression in a curated, side-effect-free subset of
 ;; clojure.core (real lexical scope, NO host interop the user can reach). On top

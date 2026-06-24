@@ -10,6 +10,7 @@
    Formula cell  = Spin compiled from an `=`-expression; refs other cells via
                    `await`, so formula->formula works."
   (:require [clojure.string :as str]
+            [uno.michelada.saltrim.addr :as addr]
             [uno.michelada.saltrim.constants :as c]
             [uno.michelada.saltrim.formula :as formula]
             [org.replikativ.spindel.signal :as sig]
@@ -271,8 +272,14 @@
     (do (set-style! sheet addr prop (or src ""))
         [addr])))
 
+(declare insert-line! delete-line!)
+
 (defn undo-step
-  "Apply one undo (`dir` = :undo) or redo (:redo) over `stacks`. See section note."
+  "Apply one undo (`dir` = :undo) or redo (:redo) over `stacks`. See section note.
+   A STRUCTURAL entry `{:op :insert|:delete :axis :at}` (a whole row/col
+   insert/delete) is always applied — never superseded — by running the inverse
+   op on undo / the op itself on redo; it reports `:affected :all` so the caller
+   re-renders the whole window."
   [sheet stacks dir]
   (let [[from to pick chk] (if (= dir :undo) [:undo :redo :before :after]
                                [:redo :undo :after :before])]
@@ -280,10 +287,20 @@
       (if (empty? fs)
         {:stacks (assoc stacks from fs to ts) :affected nil}
         (let [entry (peek fs) fs' (pop fs)]
-          (if (= (src-of sheet (:addr entry) (:prop entry)) (chk entry))
+          (cond
+            (:op entry)
+            (let [{:keys [op axis at]} entry
+                  f (if (= dir :undo)
+                      (if (= op :insert) delete-line! insert-line!)
+                      (if (= op :insert) insert-line! delete-line!))]
+              (f sheet axis at)
+              {:stacks (assoc stacks from fs' to (conj ts entry)) :affected :all})
+
+            (= (src-of sheet (:addr entry) (:prop entry)) (chk entry))
             {:stacks (assoc stacks from fs' to (conj ts entry))
              :affected (apply-prop! sheet (:addr entry) (:prop entry) (pick entry))}
-            (recur fs' ts)))))))
+
+            :else (recur fs' ts)))))))
 
 ;; --- axis sizing --------------------------------------------------------
 ;;
@@ -354,6 +371,70 @@
              (catch Exception e
                (swap! errs conj [(str addr " " (name prop)) (.getMessage e)])))))
     {:errors @errs}))
+
+;; --- structural edits: insert / delete a whole row or column ------------
+;;
+;; Inserting a blank line at index `at` on an axis shifts every cell at index
+;; >= at by one, and — crucially — every formula reference that points at a
+;; shifted cell follows (formula/insert-shift), so the sheet stays consistent (a
+;; range straddling the line grows). It is a full rebuild from the (shifted)
+;; document; `delete-line!` is the exact inverse (so an insert undoes as one step,
+;; via a structural undo entry). Cells shifted off the grid are dropped.
+
+(defn- shift-sizes
+  "Shift a sparse axis-size map for an insert(+1)/delete(-1) at index `at`
+   (`at` nil = the other axis, untouched). Drops the removed line's entry."
+  [m at delta]
+  (if (nil? at)
+    m
+    (into {} (keep (fn [[k v]]
+                     (let [k (long k)]
+                       (cond (and (neg? delta) (= k at)) nil
+                             (>= k at) [(max 0 (+ k (long delta))) v]
+                             :else     [k v]))))
+          m)))
+
+(defn- reshape!
+  "Insert (delta +1) or delete (delta -1) a line at index `at` on `axis`
+   (:row|:col). Rebuilds the cell graph from the document with addresses + refs
+   shifted. Returns the sheet."
+  [{:keys [cols rows] :as sheet} axis at delta]
+  (let [remap (fn [a] (let [{:keys [ci ri]} (addr/parse a)]
+                        (cond
+                          (and (= axis :col) (>= ci at)) (addr/make (max 0 (+ ci (long delta))) ri)
+                          (and (= axis :row) (>= ri at)) (addr/make ci (max 0 (+ ri (long delta))))
+                          :else a)))
+        drop? (fn [a] (let [{:keys [ci ri]} (addr/parse a)]   ; on delete, drop the removed line
+                        (and (neg? delta)
+                             (or (and (= axis :col) (= ci at))
+                                 (and (= axis :row) (= ri at))))))
+        rw    (fn [s] (formula/insert-shift s axis at delta))
+        in-grid? (fn [a] (let [{:keys [ci ri]} (addr/parse a)]
+                           (and (< ci c/MAX-COLS) (< ri c/MAX-ROWS))))
+        doc'  (into {} (for [[a {:keys [value style]}] (document sheet)
+                             :when (not (drop? a))
+                             :let  [na (remap a)] :when (in-grid? na)]
+                         [na (cond-> {:value (when value (rw value))}
+                               (seq style) (assoc :style (update-vals style rw)))]))
+        cw'   (shift-sizes @cols (when (= axis :col) at) delta)
+        rh'   (shift-sizes @rows (when (= axis :row) at) delta)]
+    ;; tear down the old graph (cleans every spin) then rebuild at new positions
+    (doseq [[a props] (document-styles sheet) [p _] props] (set-style! sheet a p ""))
+    (doseq [a (vec (cells sheet))] (set-cell! sheet a ""))
+    (load-document! sheet doc')
+    (load-sizing! sheet cw' rh')
+    sheet))
+
+(defn insert-line!
+  "Insert a blank row/column at index `at` on `axis` (:row|:col): cells at index
+   >= at shift one further, formula references follow, axis sizes shift."
+  [sheet axis at] (reshape! sheet axis at 1))
+
+(defn delete-line!
+  "Remove the row/column at index `at` on `axis` — the inverse of `insert-line!`.
+   (Assumes nothing references the removed line, which holds when undoing the
+   insert of a freshly-blank line.)"
+  [sheet axis at] (reshape! sheet axis at -1))
 
 ;; --- per-sheet definitions: a chunk LIBRARY (user functions; ROADMAP #2) --
 ;;
