@@ -41,7 +41,7 @@
     ;; both the explicit link (/favicon.png) and the browser's automatic
     ;; /favicon.ico request (covers pages without the <link>, e.g. login)
     ([:get "/favicon.png"] [:get "/favicon.ico"])
-    (if-let [r (io/resource "SaltRim-logo.png")]
+    (if-let [r (io/resource "favicon.png")]
       {:status 200 :headers {"Content-Type" "image/png"
                              "Cache-Control" "max-age=86400"}
        :body (io/input-stream r)}                         ; binary — not slurp
