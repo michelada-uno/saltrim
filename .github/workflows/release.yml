@@ -67,9 +67,17 @@ jobs:
       - name: Build uberjar
         run: clojure -T:build uber
 
+      # Stable, version-independent copy so consumers can fetch the newest jar
+      # from a fixed URL: releases/latest/download/server.jar. The reposado
+      # servers flake pins this via a `file+https` flake input (saltrim-jar).
+      - name: Stable-named copy for latest-download fetch
+        run: cp "target/saltrim-${{ steps.ver.outputs.version }}.jar" target/server.jar
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/saltrim-${{ steps.ver.outputs.version }}.jar
+          files: |
+            target/saltrim-${{ steps.ver.outputs.version }}.jar
+            target/server.jar
           generate_release_notes: true
           fail_on_unmatched_files: true
