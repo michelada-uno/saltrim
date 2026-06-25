@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+#
+# Cut a release in one shot: derive the canonical version, tag it, push the tag.
+# Pushing a `v*` tag triggers .github/workflows/release.yml, which runs the
+# tests, builds the uberjar, and publishes a GitHub Release with both
+# `saltrim-<version>.jar` and a stable-named `server.jar`.
+#
+#   ./scripts/release
+#
+# Version is the single source of truth in build.clj (base-version + commit
+# count); the workflow refuses a tag that disagrees, so we derive it the same
+# way here. Run from a clean, up-to-date checkout of main.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+repo="michelada-uno/saltrim"
+
+branch=$(git rev-parse --abbrev-ref HEAD)
+if [ "$branch" != "main" ]; then
+  echo "error: on branch '$branch', expected 'main'." >&2
+  exit 1
+fi
+if [ -n "$(git status --porcelain)" ]; then
+  echo "error: working tree is not clean — commit or stash first." >&2
+  exit 1
+fi
+
+git fetch --quiet origin main
+if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+  echo "error: local main != origin/main. Sync first (git pull --ff-only)." >&2
+  exit 1
+fi
+
+version=$(clojure -T:build version | tail -1)
+tag="v${version}"
+
+if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+  echo "error: tag ${tag} already exists (nothing new to release)." >&2
+  exit 1
+fi
+
+echo "Releasing ${tag} ..."
+git tag "${tag}"
+git push origin "${tag}"
+echo "Pushed ${tag}. Watch the build:  gh run watch --repo ${repo}"
+echo "Release will appear at: https://github.com/${repo}/releases/tag/${tag}"
