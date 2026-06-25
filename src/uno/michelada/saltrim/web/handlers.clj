@@ -8,6 +8,7 @@
             [uno.michelada.saltrim.addr :as addr]
             [uno.michelada.saltrim.auth :as auth]
             [uno.michelada.saltrim.db :as db]
+            [uno.michelada.saltrim.export :as export]
             [uno.michelada.saltrim.formula :as formula]
             [uno.michelada.saltrim.graph :as graph]
             [uno.michelada.saltrim.merge :as mrg]
@@ -955,4 +956,48 @@
                :body (page (:sh rec) id sname branch nil uid token)}
               {:status 403 :headers {"Content-Type" "text/html"}
                :body (denied-page uid)})))))))
+
+(defn- xlsx-response [^bytes b sname]
+  (let [fname (let [s (str/replace (str (or sname "sheet")) #"[^A-Za-z0-9_.-]" "_")]
+                (if (str/blank? s) "sheet" s))]
+    {:status 200
+     :headers {"Content-Type"        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+               "Content-Disposition" (str "attachment; filename=\"" fname ".xlsx\"")
+               "Content-Length"      (str (count b))}
+     :body (java.io.ByteArrayInputStream. b)}))
+
+(defn handle-export
+  "GET /export.xlsx — download a STATIC .xlsx of the (sheet, branch[, as-of])
+   the user can read. Mirrors handle-root's access resolution (?t / ?s / ?u / ?b /
+   ?at). Read-only: builds the workbook from the live room engine (or a transient
+   as-of snapshot) without mutating anything. Formulas are exported as their
+   computed values — see the export ns."
+  [req]
+  (let [uid (auth/req->uid req)]
+    (if-not uid
+      {:status 403 :body "not signed in"}
+      (let [token      (not-empty (qparam req "t"))
+            [id sname] (if token
+                         (when-let [tid (db/sheet-by-link-token token)]
+                           [tid (second (store/split-id tid))])
+                         (let [sname (let [s (qparam req "s")] (if (store/valid-name? s) s "default"))
+                               owner (let [o (qparam req "u")] (when (and o (re-matches auth/uid-re o)) o))]
+                           [(store/storage-id (or owner uid) sname) sname]))
+            branch     (let [b (qparam req "b")
+                             b (if (store/valid-branch? b) b db/MAIN)]
+                         (if (and id (db/branch-exists? id b)) b db/MAIN))
+            at         (some-> (qparam req "at") parse-long)]
+        (cond
+          (nil? id) {:status 403 :body "no access"}
+
+          (and at (can-read? uid id branch token))
+          (if-let [{:keys [sh]} (store/load-record-asof id branch at)]
+            (try (xlsx-response (export/workbook-bytes sh sname) sname)
+                 (finally (sheet/close! sh)))
+            {:status 403 :body "no access"})
+
+          :else
+          (if-let [rec (accessible-rec uid id branch token)]
+            (xlsx-response (export/workbook-bytes (:sh rec) sname) sname)
+            {:status 403 :body "no access"}))))))
 

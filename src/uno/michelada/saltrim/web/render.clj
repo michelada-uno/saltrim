@@ -16,7 +16,7 @@
             [uno.michelada.saltrim.store :as store]
             [uno.michelada.saltrim.version :as version]
             [uno.michelada.saltrim.constants :refer [CW RH GUT HDR OVER BAR]]
-            [uno.michelada.saltrim.web.geom :refer [axis-x axis-y col-w in-window? rgba row-h total-px url-decode view-base window]]
+            [uno.michelada.saltrim.web.geom :refer [axis-x axis-y col-w in-window? rgba row-h total-px url-decode url-encode view-base window]]
             [uno.michelada.saltrim.web.state :refer [def-editor-of owner-of session-view sessions* sheets*]]))
 
 (defn- display [sh a]
@@ -325,6 +325,14 @@
             [:div {:style h3} "Sharing"]
             [:p {:style p} "The link / lock button (top bar, owner only) shares the sheet by capability "
              "link or with specific people, at view or edit level."]
+
+            [:div {:style h3} "Export to Excel"]
+            [:p {:style p} "The " [:span {:style kbd} "⬇ xlsx"] " button downloads the sheet as an "
+             ".xlsx file. It is a " [:b "static snapshot"] ": each cell exports its current "
+             [:b "computed value"] " (with its styling and number format) — "
+             [:b "not"] " its formula. The exported file has " [:b "no live formulas and no reactivity"]
+             "; editing a value in Excel won't recompute anything. Each formula's original "
+             "source is attached as a cell comment so the logic isn't lost."]
 
             [:div {:style (str "margin-top:1rem;padding-top:.6rem;border-top:1px solid var(--line);"
                                "font:11px sans-serif;color:#9aa1a9;text-align:center;")}
@@ -793,6 +801,19 @@
           (when owner?
             [:button {:class "btn" :data-on:click "$propspanel=true" :title "sheet properties"} "⚙"])
           [:button {:class "btn" :data-on:click "$histpanel=true" :title "history — view an earlier revision"} "🕘"]
+          ;; export: a plain download link (GET /export.xlsx), carrying the same
+          ;; access params as this page. A STATIC snapshot — values, not formulas.
+          (let [q (if link-token
+                    (str "?t=" (url-encode link-token) "&b=" (url-encode branch))
+                    (str "?s=" (url-encode sname)
+                         "&u=" (url-encode (first (store/split-id storage-id)))
+                         "&b=" (url-encode branch)))]
+            [:a {:class "btn" :href (str "/export.xlsx" q) :download (str sname ".xlsx")
+                 :style "text-decoration:none;"
+                 :title (str "Export to Excel (.xlsx) — a STATIC snapshot: computed values + "
+                             "styling only. No live formulas or reactivity (each formula's "
+                             "source is kept as a cell comment).")}
+             "⬇ xlsx"])
           [:button {:class "btn" :data-on:click "$help=true" :title "help / quick guide"} "?"]))
        ;; who am I + sign out
        [:span {:style "font:12px sans-serif;color:var(--muted);white-space:nowrap;"}

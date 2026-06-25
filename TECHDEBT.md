@@ -329,3 +329,25 @@ REMAINING:
   step), so undoing a rectangle-style takes N Ctrl+Z. Insert, by contrast, is one
   structural step. Grouping consecutive per-cell edits into one undo is a possible
   refinement.
+
+## XLSX export (`export` ns) — deferred polish
+
+`/export.xlsx` writes a STATIC snapshot via Apache POI: computed values + a subset
+of presentation. Intentional limits / future polish:
+
+- **No formulas / reactivity, by design.** SaltRim formulas are Clojure, not Excel
+  syntax; we export the computed value and keep the source as a cell comment
+  rather than attempt a (lossy, partial) Clojure→Excel translation. The UI tooltip
+  + help modal warn about this.
+- **Column widths / row heights are not exported.** Our sizes are pixels; POI uses
+  1/256-character + twip units, and `autoSizeColumn` needs headless AWT fonts. Left
+  at Excel defaults for now.
+- **Colours: hex (`#rgb`/`#rrggbb`), `rgb()`, and a ~30-name subset only.** Any
+  other CSS colour name (or a style formula yielding one) is skipped (cell keeps
+  the default fill/font colour) rather than guessed.
+- **Non-ASCII sheet names are sanitised to `_` in the download filename** (no
+  RFC 5987 `filename*` yet); the worksheet TAB name keeps the real name (clamped to
+  Excel's 31-char / reserved-char rules).
+- **POI adds ~12 MB to the uberjar** (poi-ooxml + xmlbeans). Verified to work from
+  the packaged jar; the one-time `log4j-core not found` line at startup is a benign
+  POI logging fallback.

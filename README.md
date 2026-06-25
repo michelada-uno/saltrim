@@ -206,6 +206,17 @@ link** (an unguessable URL, rotatable) or with **specific people**, at view or
 edit level. Multiple people can edit the same sheet at once — you'll see each
 other's cursors and edit locks live.
 
+### Export to Excel
+
+The **⬇ xlsx** button (top bar) downloads the sheet as an `.xlsx` file. It is a
+**static snapshot**: every cell exports its current **computed value**, carrying
+its styling (fill, font colour, bold/italic, alignment) and number format — but
+**not** its formula. SaltRim formulas are Clojure expressions, not Excel syntax,
+so the exported file has **no live formulas and no reactivity**: changing a value
+in Excel won't recompute anything. Each formula's original source is attached as
+a **cell comment** so the logic isn't lost. The export respects what you're
+viewing — the current branch, or a read-only history snapshot.
+
 ## Running & development
 
 ```bash
