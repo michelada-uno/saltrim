@@ -98,7 +98,7 @@
               true)))
 
       :formula
-      (let [{:keys [form deps]} (formula/parse (subs (str/trim raw) 1))
+      (let [{:keys [form deps]} (formula/parse (subs (str/trim raw) 1) addr)
             _  (when (would-cycle? meta addr deps)
                  (throw (ex-info "circular reference" {:addr addr :deps deps})))
             sp (formula/compile @sci form)]

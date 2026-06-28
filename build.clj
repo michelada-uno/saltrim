@@ -19,7 +19,7 @@
 ;; here. The patch number is the git commit count — monotonic, never reset when
 ;; the minor/major bumps — so the full version is e.g. "0.4.57". Cutting a new
 ;; line is a one-string edit.
-(def base-version "0.4")
+(def base-version "0.5")
 
 (defn- compute-version []
   (format "%s.%s" base-version (b/git-count-revs nil)))

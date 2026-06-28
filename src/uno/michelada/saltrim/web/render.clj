@@ -241,6 +241,12 @@
              " — or the short form " [:span {:style kbd} "$A1"] " / " [:span {:style kbd} "$A3:D8"] "."]
             [:p {:style p} "e.g. " [:span {:style kbd} "=(+ $A1 $B1)"] " · "
              [:span {:style kbd} "=(reduce + $A1:A3)"]]
+            [:p {:style p} "Relative refs point by offset from the cell itself: "
+             [:span {:style kbd} "$<col><row>"] " where each part is "
+             [:span {:style kbd} "_"] " (same), " [:span {:style kbd} "+N"] ", or "
+             [:span {:style kbd} "-N"] ". They survive copy/paste, so they fill series. "
+             "e.g. " [:span {:style kbd} "=(inc $_-1)"] " copied down counts up; "
+             [:span {:style kbd} "=(+ $-2_ $-1_)"] " copied across is Fibonacci."]
             [:p {:style p} "Built-in functions: math (" [:span {:style kbd} "sum"] ", "
              [:span {:style kbd} "round"] ", " [:span {:style kbd} "sqrt"] "…), stats ("
              [:span {:style kbd} "mean"] ", " [:span {:style kbd} "median"] ", "

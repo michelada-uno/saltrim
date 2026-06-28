@@ -408,6 +408,31 @@
       (is (= 200 (v s "B1")))
       (is (= 150 (v s "B2"))))))
 
+(deftest relative-refs
+  (testing "parse: $<col><row> resolves by offset from the owner cell"
+    (is (= #{"B2"} (:deps (formula/parse "(inc $_-1)" "B3"))) "$_-1 in B3 -> B2")
+    (is (= #{"A1" "B1"} (:deps (formula/parse "(+ $-2_ $-1_)" "C1"))) "two cols left in C1")
+    (is (= #{"C5"} (:deps (formula/parse "$+1-1" "B6"))) "$+1-1 in B6 -> C5"))
+  (testing "off-grid offset throws a clear error"
+    (is (thrown-with-msg? Exception #"off the grid" (formula/parse "$-1_" "A1")))
+    (is (thrown-with-msg? Exception #"off the grid" (formula/parse "$_-1" "A1"))))
+  (testing "relative refs are copy-invariant — shift-refs leaves them alone"
+    (is (= "=(inc $_-1)" (formula/shift-refs "=(inc $_-1)" 2 3)))
+    (is (= "=(+ $_-1 $B1)" (formula/shift-refs "=(+ $_-1 $A1)" 1 0)) "relative kept, absolute shifted"))
+  (testing "a relative self-reference is a cycle"
+    (let [s (mk)]
+      (is (thrown-with-msg? Exception #"circular" (put s "B1" "=(inc $__)")))))
+  (testing "counter: B2=1, B3.. = =(inc $_-1) (same source in every cell) -> 1..10"
+    (let [s (mk)]
+      (put s "B2" "1")
+      (doseq [r (range 3 12)] (put s (str "B" r) "=(inc $_-1)"))
+      (is (= [1 2 3 4 5 6 7 8 9 10] (mapv #(v s (str "B" %)) (range 2 12))))))
+  (testing "fibonacci: A1=0 B1=1, C1.. = =(+ $-2_ $-1_)"
+    (let [s (mk)]
+      (put s "A1" "0") (put s "B1" "1")
+      (doseq [c ["C" "D" "E" "F" "G" "H"]] (put s (str c "1") "=(+ $-2_ $-1_)"))
+      (is (= [0 1 1 2 3 5 8 13] (mapv #(v s (str % "1")) ["A" "B" "C" "D" "E" "F" "G" "H"]))))))
+
 (deftest insert-shift-refs
   (testing "row insert at index 2 (+1): refs >= row3 bump, ranges straddling grow"
     (is (= "(+ (#cell A1) (#cell A6) (sum #cells A1:A6) $B4)"

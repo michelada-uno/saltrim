@@ -27,6 +27,19 @@ Or use the shorter `$` form — `$A1` is the same as `#cell A1`, and `$A3:D8` th
 same as `#cells A3:D8` (it's just shorthand; it shifts on paste like any other
 reference).
 
+**Relative references** point to a cell by *offset from the cell itself*, written
+`$<col><row>` where each of col/row is `_` (same index), `+N`, or `-N`. They are
+resolved per cell, so they **survive copy/paste unchanged** — copy one down or
+across and each copy points relative to its own position. That makes series
+trivial:
+
+```clojure
+; B2 = 1, then B3 = =(inc $_-1) copied down B4:B11  ->  B2:B11 = 1,2,…,10
+=(inc $_-1)                  ; "the cell one row up, same column"
+; A1 = 0, B1 = 1, then C1 = =(+ $-2_ $-1_) copied right  ->  0,1,1,2,3,5,8,…
+=(+ $-2_ $-1_)               ; "two cols left + one col left, same row"
+```
+
 Examples:
 
 ```clojure

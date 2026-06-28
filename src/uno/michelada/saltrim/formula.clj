@@ -8,8 +8,14 @@
    Any inclusive rectangle works (for map/reduce); ranges expand at read time.
 
    Terse sugar: a bare `$A1` reads like `#cell A1`, and `$A3:D8` like
-   `#cells A3:D8` — `$` is just a compact cell-ref sigil (relative; shifts on
-   paste like the reader tags), not an absolute marker. See `dollar-ref`.
+   `#cells A3:D8` — `$` is just a compact cell-ref sigil (shifts on paste like the
+   reader tags). See `dollar-ref`.
+
+   Relative sugar: `$<col><row>` names a cell by OFFSET from the owner — each of
+   col/row is `_` (same index), `+N`, or `-N`. e.g. in B3, `$_-1` -> B2 and
+   `$-2_` -> the cell two columns left. Resolved against the owner at parse time,
+   so it is copy-invariant (re-resolves per destination — `=(inc $_-1)` copied
+   down fills a running counter). See `rel-ref`.
 
    Why SCI: the old path host-`eval`d the body under a symbol whitelist, which
    could not allow `let`/`fn` (the user's own binder names aren't in the list).
@@ -84,6 +90,31 @@
         (cons 'vector (map ref-marker (addr/range-cells a b)))
         (ref-marker a)))))
 
+;; A RELATIVE `$`-ref names a cell by OFFSET from the owner cell, so it survives
+;; copy/paste unchanged (re-resolved per destination) — the inverse of the
+;; absolute `$A1` sugar above. Syntax `$<col><row>` where each part is `_` (same
+;; index), `+N`, or `-N`. e.g. in B3: `$_-1` -> B2, `$-2_` -> the cell two cols
+;; left, `$+1-1` -> one col right & one row up. Disjoint from `$A1` (those start
+;; with a column LETTER). `shift-refs` deliberately leaves these alone.
+(def ^:private rel-ref-re #"\$(_|[-+]\d+)(_|[-+]\d+)")
+
+(defn- rel-coord [part base]
+  (if (= "_" part) base (+ base (Long/parseLong part))))   ; parseLong accepts a leading +
+
+(defn- rel-ref
+  "Marker for a relative `$`-ref symbol resolved against owner `self`, or nil if
+   `x` isn't one. Throws when the offset lands off the grid (negative col/row)."
+  [x self]
+  (when (and self (symbol? x))
+    (when-let [[_ c r] (re-matches rel-ref-re (name x))]
+      (let [{:keys [ci ri]} (addr/parse self)
+            nc (rel-coord c ci)
+            nr (rel-coord r ri)]
+        (if (and (>= nc 0) (>= nr 0))
+          (ref-marker (addr/make nc nr))
+          (throw (ex-info (str "relative reference $" c r " off the grid from " self)
+                          {:self self})))))))
+
 (defn parse
   "Formula string (without leading =) -> {:form :deps}.
 
@@ -103,7 +134,7 @@
                 (fn [x]
                   (cond
                     (and self (= '$val x)) (ref-marker self)
-                    :else                  (or (dollar-ref x) x)))
+                    :else                  (or (rel-ref x self) (dollar-ref x) x)))
                 form0)]
      {:form form :deps (deps form)})))
 
