@@ -301,14 +301,20 @@
 
 (defn- capture-clip
   "Capture all non-empty selected cells, keyed by offset from the selection's
-   bounding-box top-left."
+   bounding-box top-left. `:w`/`:h` are the FULL selection footprint (including
+   empty cells) so a smaller clip can be tiled across a larger paste target."
   [sh selcells]
   (when-let [[c0 r0] (sel-topleft selcells)]
-    {:origin [c0 r0]
-     :cells  (vec (for [a (selected-cells selcells)
-                        :let [{:keys [ci ri]} (addr/parse a) v (sheet/raw sh a)]
-                        :when v]
-                    {:dc (- ci c0) :dr (- ri r0) :value v}))}))
+    (let [cells (selected-cells selcells)
+          cis   (map #(:ci (addr/parse %)) cells)
+          ris   (map #(:ri (addr/parse %)) cells)]
+      {:origin [c0 r0]
+       :w (inc (- (apply max cis) c0))
+       :h (inc (- (apply max ris) r0))
+       :cells (vec (for [a cells
+                         :let [{:keys [ci ri]} (addr/parse a) v (sheet/raw sh a)]
+                         :when v]
+                     {:dc (- ci c0) :dr (- ri r0) :value v}))})))
 
 (defn handle-copy [req]
   (with-access req
@@ -335,22 +341,37 @@
       (record-edit! sid a :value before (sheet/raw sh a)))
     (distinct @affected)))
 
+(defn- tile-origins
+  "Top-left coords at which to stamp a `cw`×`ch` clip so it tiles across the
+   target bounding box [tc0 tr0 tc1 tr1]. Always yields ≥1 origin: a target
+   smaller than the clip pastes it once (so a block still pastes whole), a larger
+   selection gets filled (a 1×1 clip lands in every cell)."
+  [tc0 tr0 tc1 tr1 cw ch]
+  (for [tr (range tr0 (inc tr1) (max 1 ch))
+        tc (range tc0 (inc tc1) (max 1 cw))]
+    [tc tr]))
+
 (defn handle-paste [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [sid selcells]} gen]
       (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
       (if (not= :read-write (:level rec))
         (signals! gen {:err "read-only access — you can't edit this sheet"})
-        (let [sh   (:sh rec)
-              clip (get-in @sessions* [sid :clip])
-              tgt  (sel-topleft selcells)]
-          (when (and clip tgt (seq (:cells clip)))
+        (let [sh    (:sh rec)
+              clip  (get-in @sessions* [sid :clip])
+              cells (selected-cells selcells)]
+          (when (and clip (seq cells) (seq (:cells clip)))
             (locking edit-lock
               (try
-                (let [affected (paste-cells! sh sid clip (first tgt) (second tgt))]
-                  (when (seq affected)
+                (let [crs (map #(let [{:keys [ci ri]} (addr/parse %)] [ci ri]) cells)
+                      tc0 (apply min (map first crs))  tr0 (apply min (map second crs))
+                      tc1 (apply max (map first crs))  tr1 (apply max (map second crs))
+                      affected (atom [])]
+                  (doseq [[tc tr] (tile-origins tc0 tr0 tc1 tr1 (or (:w clip) 1) (or (:h clip) 1))]
+                    (swap! affected into (paste-cells! sh sid clip tc tr)))
+                  (when (seq @affected)
                     (sheet/settle! sh) (save-rec! (:room rec) uid)
-                    (push-changes! gen sid (:room rec) sh affected)))
+                    (push-changes! gen sid (:room rec) sh (distinct @affected))))
                 (catch Throwable e
                   (signals! gen {:err (pretty-err (.getMessage e))}))))))))))
 

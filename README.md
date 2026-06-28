@@ -167,6 +167,10 @@ sheet-wide default column width and row height.
 - **Ctrl/⌘+C** copy · **Ctrl/⌘+X** cut · **Ctrl/⌘+V** paste at the selected cell.
 - Pasted **formulas shift their references** relative to the move — copy
   `=(+ #cell A1 1)` down a row and it pastes `=(+ #cell A2 1)`.
+- **Select a range before pasting to fill it** — a single copied cell lands in
+  every selected cell (a copied block tiles across the selection), with relative
+  refs re-resolved per cell. So one `=(inc $_-1)` pasted down a column is a
+  running counter.
 
 ### Undo / redo
 

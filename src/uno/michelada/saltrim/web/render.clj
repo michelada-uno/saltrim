@@ -305,6 +305,9 @@
              " cut · " [:span {:style kbd} "Ctrl/⌘+V"] " paste at the selected cell. Pasted formulas "
              "shift their references relative to the move (copy " [:span {:style kbd} "=(+ #cell A1 1)"]
              " down a row pastes " [:span {:style kbd} "=(+ #cell A2 1)"] ")."]
+            [:p {:style p} "Select a range before pasting to " [:b "fill"] " it: a single copied cell "
+             "lands in every selected cell (with relative refs re-resolved), so e.g. one "
+             [:span {:style kbd} "=(inc $_-1)"] " pasted down a column is a running counter."]
 
             [:div {:style h3} "Undo / redo"]
             [:p {:style p} [:span {:style kbd} "Ctrl/⌘+Z"] " undoes your last edit · "
