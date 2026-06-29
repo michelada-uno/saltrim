@@ -60,6 +60,14 @@ text (`upper`, `lower`, `trim`, `join`, `split`, `str-replace`, `includes?`, …
 and date over ISO `yyyy-MM-dd` strings (`today`, `year`, `month`, `day`,
 `days-between`).
 
+**Empty cells** read as `nil`. The aggregate stdlib functions (`sum`, `mean`,
+`median`, `product`, `variance`, `stdev`) **ignore blanks**, so a roomy range over
+a partially-filled column just works — `=(sum $B1:B20)` sums whatever rows you've
+filled in, and `mean` divides by the count of *present* numbers (not the whole
+range). A blank counts as nothing, not zero — so it never skews an average. In
+plain arithmetic a `nil` won't add, so wrap a maybe-blank cell to treat it as
+zero: `=(+ (or $B5 0) 1)`.
+
 ### Reusable functions (the `ƒ` library)
 
 The `ƒ` button (top bar) opens this sheet's **definitions library**: your own

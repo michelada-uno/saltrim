@@ -248,6 +248,10 @@
              [:span {:style kbd} "join"] ", " [:span {:style kbd} "split"] "…), date ("
              [:span {:style kbd} "today"] ", " [:span {:style kbd} "year"] ", "
              [:span {:style kbd} "days-between"] ")."]
+            [:p {:style p} "A blank cell reads as " [:span {:style kbd} "nil"] ". Aggregates ("
+             [:span {:style kbd} "sum"] ", " [:span {:style kbd} "mean"] ", …) ignore blanks, so "
+             [:span {:style kbd} "=(sum $B1:B20)"] " works even with empty rows. In plain arithmetic "
+             "wrap a maybe-blank cell to treat it as zero: " [:span {:style kbd} "=(+ (or $B5 0) 1)"] "."]
 
             [:div {:style h3} "Reusable functions (ƒ)"]
             [:p {:style p} "The " [:span {:style kbd} "ƒ"] " button (top bar) opens this sheet's "

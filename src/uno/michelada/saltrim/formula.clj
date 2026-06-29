@@ -217,11 +217,17 @@
 (defn- no-io [& _]
   (throw (ex-info "I/O isn't available in formulas — the sandbox is pure (no console)" {})))
 
-(defn- mean* [c] (if (seq c) (/ (double (reduce + 0 c)) (count c)) 0))
+(defn- nums
+  "Keep only the numbers in a cell collection, so aggregates IGNORE blank cells
+   (which resolve to nil) — matching a spreadsheet's SUM/AVERAGE-skip-blanks."
+  [c] (filter number? c))
+
+(defn- mean* [c] (let [c (nums c)] (if (seq c) (/ (double (reduce + 0 c)) (count c)) 0)))
 (defn- var* [c]
-  (let [n (count c)]
+  (let [c (nums c) n (count c)]
     (if (zero? n) 0
-        (let [m (mean* c)] (/ (reduce + (map #(let [d (- % m)] (* d d)) c)) n)))))
+        (let [m (/ (double (reduce + 0 c)) n)]
+          (/ (reduce + (map #(let [d (- % m)] (* d d)) c)) n)))))
 
 (def stdlib
   "Predefined functions merged into clojure.core for every formula sandbox.
@@ -237,12 +243,12 @@
    'ln      (fn [x] (Math/log (double x)))
    'log10   (fn [x] (Math/log10 (double x)))
    'sign    (fn [x] (long (Math/signum (double x))))
-   'sum     (fn [c] (reduce + 0 c))
-   'product (fn [c] (reduce * 1 c))
-   ;; stats
+   'sum     (fn [c] (reduce + 0 (nums c)))
+   'product (fn [c] (reduce * 1 (nums c)))
+   ;; stats — all skip blank (nil) cells, like a spreadsheet
    'mean   mean*
    'avg    mean*
-   'median (fn [c] (let [s (vec (sort c)) n (count s)]
+   'median (fn [c] (let [s (vec (sort (nums c))) n (count s)]
                      (cond (zero? n) 0
                            (odd? n)  (nth s (quot n 2))
                            :else (/ (+ (nth s (dec (quot n 2))) (nth s (quot n 2))) 2.0))))

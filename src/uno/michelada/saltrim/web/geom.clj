@@ -77,7 +77,6 @@
       "type error (number expected)"
       (re-find #"cannot be cast" m)    "type error"
       (re-find #"Divide by zero" m)    "divide by zero"
-      (re-find #"unknown cell" m)      "reference to empty cell"
       (re-find #"Could not resolve symbol" m) "unknown name or function in the formula"
       (re-find #"circular" m)          "circular reference"
       (re-find #"locked by another" m) "cell is being edited by another collaborator"

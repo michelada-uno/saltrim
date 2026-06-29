@@ -433,6 +433,30 @@
       (doseq [c ["C" "D" "E" "F" "G" "H"]] (put s (str c "1") "=(+ $-2_ $-1_)"))
       (is (= [0 1 1 2 3 5 8 13] (mapv #(v s (str % "1")) ["A" "B" "C" "D" "E" "F" "G" "H"]))))))
 
+(deftest empty-cells
+  (testing "a referenced empty cell is nil, not an error"
+    (let [s (mk)]
+      (is (nil? (v s "A1")) "an unset cell is nil")
+      (put s "B1" "=#cell A1")
+      (is (nil? (v s "B1")) "ref to a blank cell -> nil (no #ERR)")))
+  (testing "aggregates ignore blank cells (like a spreadsheet)"
+    (let [s (mk)]
+      (put s "B1" "10") (put s "B3" "20") (put s "B5" "30")   ; B2,B4,B6..B20 blank
+      (put s "C1" "=(sum $B1:B20)")
+      (put s "C2" "=(mean $B1:B20)")
+      (is (= 60 (v s "C1")) "sum skips blanks (many blanks -> no glitch)")
+      (is (= 20.0 (v s "C2")) "mean divides by the 3 present numbers, not 20")))
+  (testing "reactive: filling / clearing a blank recomputes the aggregate"
+    (let [s (mk)]
+      (put s "B1" "10") (put s "C1" "=(sum $B1:B20)")
+      (is (= 10 (v s "C1")))
+      (put s "B7" "5")  (is (= 15 (v s "C1")) "fill a blank -> recompute")
+      (put s "B7" "")   (is (= 10 (v s "C1")) "clear it -> recompute back")))
+  (testing "(or $X 0) treats a blank as zero in scalar math"
+    (let [s (mk)]
+      (put s "A2" "=(+ (or #cell A1 0) 5)")
+      (is (= 5 (v s "A2"))))))
+
 (deftest insert-shift-refs
   (testing "row insert at index 2 (+1): refs >= row3 bump, ranges straddling grow"
     (is (= "(+ (#cell A1) (#cell A6) (sum #cells A1:A6) $B4)"
