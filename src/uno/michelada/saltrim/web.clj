@@ -38,6 +38,12 @@
                                                    "Cache-Control" "max-age=86400"}
                              :body (io/input-stream r)}
                             {:status 404 :body "no logo"})
+    ;; 1200x630 social-preview card, referenced by og:image
+    [:get "/SaltRim-opengraph.png"] (if-let [r (io/resource "SaltRim-opengraph.png")]
+                                       {:status 200 :headers {"Content-Type" "image/png"
+                                                              "Cache-Control" "max-age=86400"}
+                                        :body (io/input-stream r)}
+                                       {:status 404 :body "no opengraph image"})
     ;; both the explicit link (/favicon.png) and the browser's automatic
     ;; /favicon.ico request (covers pages without the <link>, e.g. login)
     ([:get "/favicon.png"] [:get "/favicon.ico"])

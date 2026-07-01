@@ -659,7 +659,7 @@
       [:meta {:property "og:url" :content (str (auth/base-url) "/?s=" sname
                                                 (when (not= branch db/MAIN) (str "&b=" branch)))}]
       [:meta {:property "og:image" :content (str (auth/base-url) "/SaltRim-opengraph.png")}]
-      [:meta {:name "twitter:card" :content "summary"}]
+      [:meta {:name "twitter:card" :content "summary_large_image"}]
       ;; Cells are display <div class="cell"> (not inputs); the floating editor
       ;; is the single #editor input. Both are absolutely positioned (cells by
       ;; their inline left/top, #editor by app.js) — without this the left/top
@@ -1307,7 +1307,7 @@
                 :content "A simple-but-powerful Clojure reactive spreadsheet. Cells are Clojure expressions, collaborative edits and git-like branching are build in."}]
         [:meta {:property "og:url" :content (auth/base-url)}]
         [:meta {:property "og:image" :content (str (auth/base-url) "/SaltRim-opengraph.png")}]
-        [:meta {:name "twitter:card" :content "summary"}]]
+        [:meta {:name "twitter:card" :content "summary_large_image"}]]
        ;; explicit light bg so an OS dark theme can't black out the page; the
        ;; centered column lives in an inner wrapper.
        [:body {:style "font-family:sans-serif;margin:0;min-height:100vh;background:#fefefe;color:#3a4149;"}
