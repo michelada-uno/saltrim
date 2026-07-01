@@ -1299,7 +1299,15 @@
      (h/html
       [:html
        [:head [:meta {:charset "utf-8"}] [:title "SaltRim — sign in"]
-        [:link {:rel "icon" :type "image/png" :href "/favicon.png"}]]
+        [:link {:rel "icon" :type "image/png" :href "/favicon.png"}]
+        [:meta {:property "og:type" :content "website"}]
+        [:meta {:property "og:site_name" :content "SaltRim"}]
+        [:meta {:property "og:title" :content "SaltRim — sign in"}]
+        [:meta {:property "og:description"
+                :content "A simple-but-powerful Clojure reactive spreadsheet."}]
+        [:meta {:property "og:url" :content (auth/base-url)}]
+        [:meta {:property "og:image" :content (str (auth/base-url) "/SaltRim.png")}]
+        [:meta {:name "twitter:card" :content "summary"}]]
        ;; explicit light bg so an OS dark theme can't black out the page; the
        ;; centered column lives in an inner wrapper.
        [:body {:style "font-family:sans-serif;margin:0;min-height:100vh;background:#fefefe;color:#3a4149;"}
